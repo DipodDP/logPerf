@@ -93,6 +93,30 @@ func (rp *RemotePanel) Container() *fyne.Container {
 	return rp.container
 }
 
+// LoadPreferences restores panel values from persistent preferences.
+func (rp *RemotePanel) LoadPreferences(prefs fyne.Preferences) {
+	if v := prefs.String("remote.host"); v != "" {
+		rp.hostEntry.SetText(v)
+	}
+	if v := prefs.String("remote.user"); v != "" {
+		rp.userEntry.SetText(v)
+	}
+	if v := prefs.String("remote.key_path"); v != "" {
+		rp.keyPathEntry.SetText(v)
+	}
+	if v := prefs.String("remote.port"); v != "" {
+		rp.portEntry.SetText(v)
+	}
+}
+
+// SavePreferences persists panel values to preferences (excluding password).
+func (rp *RemotePanel) SavePreferences(prefs fyne.Preferences) {
+	prefs.SetString("remote.host", rp.hostEntry.Text)
+	prefs.SetString("remote.user", rp.userEntry.Text)
+	prefs.SetString("remote.key_path", rp.keyPathEntry.Text)
+	prefs.SetString("remote.port", rp.portEntry.Text)
+}
+
 func (rp *RemotePanel) onConnect() {
 	cfg := internalssh.ConnectConfig{
 		Host:     rp.hostEntry.Text,

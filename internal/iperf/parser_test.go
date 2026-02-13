@@ -44,7 +44,17 @@ const sampleJSON = `{
 			"bytes": 1170000000,
 			"bits_per_second": 936000000.0,
 			"sender": false
-		}
+		},
+		"streams": [
+			{
+				"sender": {"socket": 5, "bits_per_second": 470000000.0, "retransmits": 20},
+				"receiver": {"socket": 5, "bits_per_second": 468000000.0}
+			},
+			{
+				"sender": {"socket": 6, "bits_per_second": 470000000.0, "retransmits": 22},
+				"receiver": {"socket": 6, "bits_per_second": 468000000.0}
+			}
+		]
 	}
 }`
 
@@ -85,6 +95,26 @@ func TestParseResult(t *testing.T) {
 	// Check Mbps helpers
 	if math.Abs(result.SentMbps()-940.0) > 0.01 {
 		t.Errorf("SentMbps() = %f, want 940.0", result.SentMbps())
+	}
+
+	// Check per-stream data
+	if len(result.Streams) != 2 {
+		t.Fatalf("Streams count = %d, want 2", len(result.Streams))
+	}
+	if result.Streams[0].ID != 1 {
+		t.Errorf("Streams[0].ID = %d, want 1", result.Streams[0].ID)
+	}
+	if math.Abs(result.Streams[0].SentBps-470000000.0) > 1 {
+		t.Errorf("Streams[0].SentBps = %f, want 470000000", result.Streams[0].SentBps)
+	}
+	if math.Abs(result.Streams[0].ReceivedBps-468000000.0) > 1 {
+		t.Errorf("Streams[0].ReceivedBps = %f, want 468000000", result.Streams[0].ReceivedBps)
+	}
+	if result.Streams[0].Retransmits != 20 {
+		t.Errorf("Streams[0].Retransmits = %d, want 20", result.Streams[0].Retransmits)
+	}
+	if result.Streams[1].Retransmits != 22 {
+		t.Errorf("Streams[1].Retransmits = %d, want 22", result.Streams[1].Retransmits)
 	}
 }
 

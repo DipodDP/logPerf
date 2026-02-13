@@ -16,6 +16,10 @@ func BuildMainWindow(app fyne.App) fyne.Window {
 	remotePanel := NewRemotePanel()
 	controls := NewControls(configForm, outputView, historyView, remotePanel)
 
+	prefs := app.Preferences()
+	configForm.LoadPreferences(prefs)
+	remotePanel.LoadPreferences(prefs)
+
 	leftPanel := container.NewVBox(
 		configForm.Container(),
 		controls.Container(),
@@ -36,5 +40,12 @@ func BuildMainWindow(app fyne.App) fyne.Window {
 	content.SetOffset(0.45)
 
 	win.SetContent(content)
+
+	win.SetCloseIntercept(func() {
+		configForm.SavePreferences(prefs)
+		remotePanel.SavePreferences(prefs)
+		win.Close()
+	})
+
 	return win
 }

@@ -245,12 +245,36 @@ All claims in updated conspect are backed by:
 
 ## Accuracy Statement
 
-This conspect reflects the state of iperf-tool as of **February 13, 2025** with:
+This conspect reflects the state of iperf-tool as of **February 13, 2026** with:
 
 - `main.go` (89 lines)
-- `internal/` (4 packages, 14 files)
-- `ui/` (6 Fyne components)
-- Total: 24 Go files, ~2500 lines implementation code, ~528 lines test code
+- `internal/` (6 packages, ~18 files) — added `format/` and `export/txt.go`
+- `ui/` (6 Fyne components, updated with `fyne.Do()` and preferences)
+- Total: ~30 Go files, ~3000 lines implementation code, ~700 lines test code
+
+### Changes in v2.0 (February 2026)
+
+**New packages:**
+- `internal/format` — `FormatResult()` for human-readable per-stream output
+- `internal/export/txt.go` — TXT export using `FormatResult`
+
+**New model types:**
+- `StreamResult` struct with `ID`, `SentBps`, `ReceivedBps`, `Retransmits`
+- `TestResult.Streams []StreamResult` field
+- `TestResult.VerifyStreamTotals()` — validates per-stream totals vs summary
+
+**Thread safety fix:**
+- All goroutine-to-UI calls wrapped in `fyne.Do()` (Fyne v2.5+)
+- Prevents deadlocks in `OutputView.AppendLine()`, `OutputView.Clear()`, `Controls.resetState()`, `HistoryView.AddResult()`
+
+**Preferences persistence:**
+- `app.NewWithID("com.iperf-tool.gui")` enables Fyne Preferences API
+- `ConfigForm.LoadPreferences()` / `SavePreferences()` for all form fields
+- `RemotePanel.LoadPreferences()` / `SavePreferences()` (password excluded)
+- `win.SetCloseIntercept()` saves before window closes (vs `SetOnClosed` which was unreliable)
+
+**Weaknesses fixed:**
+- ~~Fyne thread model fragile~~ → Now uses `fyne.Do()` properly
 
 If code changes, update:
 

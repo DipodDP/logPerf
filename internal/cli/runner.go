@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"iperf-tool/internal/export"
+	"iperf-tool/internal/format"
 	"iperf-tool/internal/iperf"
 	"iperf-tool/internal/model"
 	"iperf-tool/internal/ssh"
@@ -202,17 +203,6 @@ func (r *RemoteServerRunner) CheckStatus() (bool, error) {
 
 // PrintResult formats and prints a test result.
 func PrintResult(result *model.TestResult) {
-	fmt.Println("\n=== Test Results ===")
-	fmt.Printf("Timestamp:       %s\n", result.Timestamp.Format("2006-01-02 15:04:05"))
-	fmt.Printf("Server:          %s:%d\n", result.ServerAddr, result.Port)
-	fmt.Printf("Protocol:        %s\n", result.Protocol)
-	fmt.Printf("Parallel:        %d streams\n", result.Parallel)
-	fmt.Printf("Duration:        %d seconds\n", result.Duration)
-	fmt.Printf("Sent:            %.2f Mbps\n", result.SentMbps())
-	fmt.Printf("Received:        %.2f Mbps\n", result.ReceivedMbps())
-	fmt.Printf("Retransmits:     %d\n", result.Retransmits)
-	if result.Error != "" {
-		fmt.Printf("Error:           %s\n", result.Error)
-	}
-	fmt.Println("====================")
+	fmt.Println()
+	fmt.Println(format.FormatResult(result))
 }

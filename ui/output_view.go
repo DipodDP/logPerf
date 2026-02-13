@@ -31,17 +31,21 @@ func (ov *OutputView) Container() *container.Scroll {
 	return ov.scrollBox
 }
 
-// AppendLine adds a line to the output view (thread-safe via Fyne's entry).
+// AppendLine adds a line to the output view, safe to call from any goroutine.
 func (ov *OutputView) AppendLine(line string) {
-	current := ov.text.Text
-	if current != "" {
-		current += "\n"
-	}
-	ov.text.SetText(current + line)
-	ov.scrollBox.ScrollToBottom()
+	fyne.Do(func() {
+		current := ov.text.Text
+		if current != "" {
+			current += "\n"
+		}
+		ov.text.SetText(current + line)
+		ov.scrollBox.ScrollToBottom()
+	})
 }
 
-// Clear empties the output view.
+// Clear empties the output view, safe to call from any goroutine.
 func (ov *OutputView) Clear() {
-	ov.text.SetText("")
+	fyne.Do(func() {
+		ov.text.SetText("")
+	})
 }

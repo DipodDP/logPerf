@@ -1,0 +1,51 @@
+package format
+
+import (
+	"fmt"
+	"strings"
+
+	"iperf-tool/internal/model"
+)
+
+// FormatResult produces a human-readable formatted output of a test result.
+func FormatResult(r *model.TestResult) string {
+	var b strings.Builder
+
+	b.WriteString("=== Test Results ===\n")
+	b.WriteString(fmt.Sprintf("Timestamp:       %s\n", r.Timestamp.Format("2006-01-02 15:04:05")))
+	b.WriteString(fmt.Sprintf("Server:          %s:%d\n", r.ServerAddr, r.Port))
+	b.WriteString(fmt.Sprintf("Protocol:        %s\n", r.Protocol))
+
+	if r.Parallel > 1 {
+		b.WriteString(fmt.Sprintf("Parallel:        %d streams\n", r.Parallel))
+	}
+
+	b.WriteString(fmt.Sprintf("Duration:        %d seconds\n", r.Duration))
+
+	if r.Error != "" {
+		b.WriteString(fmt.Sprintf("\nError: %s\n", r.Error))
+		b.WriteString("====================")
+		return b.String()
+	}
+
+	if len(r.Streams) > 1 {
+		b.WriteString("\n--- Per-Stream Results ---\n")
+		for _, s := range r.Streams {
+			b.WriteString(fmt.Sprintf("Stream %d:  Sent: %.2f Mbps  Received: %.2f Mbps\n",
+				s.ID, s.SentMbps(), s.ReceivedMbps()))
+		}
+	}
+
+	b.WriteString("\n--- Summary ---\n")
+	b.WriteString(fmt.Sprintf("Sent:            %.2f Mbps\n", r.SentMbps()))
+	b.WriteString(fmt.Sprintf("Received:        %.2f Mbps\n", r.ReceivedMbps()))
+	b.WriteString(fmt.Sprintf("Retransmits:     %d\n", r.Retransmits))
+
+	sentOK, recvOK := r.VerifyStreamTotals()
+	if !sentOK || !recvOK {
+		b.WriteString("WARNING: Per-stream totals do not match summary values\n")
+	}
+
+	b.WriteString("====================")
+	return b.String()
+}

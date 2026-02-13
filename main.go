@@ -18,7 +18,7 @@ func main() {
 
 	// No flags provided or help requested = use GUI
 	if cfg == nil {
-		a := app.New()
+		a := app.NewWithID("com.iperf-tool.gui")
 		win := ui.BuildMainWindow(a)
 		win.ShowAndRun()
 		return

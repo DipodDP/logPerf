@@ -19,9 +19,17 @@ A cross-platform Go application with **GUI and CLI** that wraps iperf3 for netwo
 - Start/stop remote iperf3 servers in daemon mode
 - Privilege verification (sudoers/administrators)
 
+✅ **Formatted Output**
+- Per-stream throughput breakdown for parallel tests
+- Human-readable summary with stream totals verification
+
 ✅ **Data Export**
 - CSV output with append mode for continuous logging
+- TXT log export alongside CSV with formatted results
 - Excel-compatible format
+
+✅ **Preferences Persistence**
+- Form values saved between app restarts (Fyne Preferences API)
 
 ✅ **Cross-Platform**
 - Windows, Linux, macOS
@@ -89,11 +97,11 @@ GOOS=windows GOARCH=amd64 go build -o iperf-tool.exe
 
 ### GUI
 1. Run `iperf-tool` with no arguments
-2. Fill in server address and parameters
+2. Fill in server address and parameters (values persist between restarts)
 3. Click "Start Test"
-4. View live output in "Live Output" tab
+4. View live output in "Live Output" tab — formatted with per-stream data on completion
 5. Check "History" tab for past results
-6. Click "Export CSV" to save results
+6. Click "Export CSV" to save results (also creates a `.txt` file alongside)
 
 ### Remote Server (GUI)
 1. Fill SSH connection details (host, username, key/password)
@@ -146,7 +154,8 @@ See [docs/CLI.md](docs/CLI.md) for comprehensive flag reference and examples.
    ├────────────────────────────┤
    │ • internal/iperf (runner)  │
    │ • internal/ssh (remote)    │
-   │ • internal/export (CSV)    │
+   │ • internal/format (output) │
+   │ • internal/export (CSV/TXT)│
    │ • internal/model (types)   │
    └────────────────────────────┘
 ```
@@ -161,7 +170,8 @@ iperf-tool/
 │   ├── cli/                   # CLI command parsing and execution
 │   ├── iperf/                 # iperf3 runner and JSON parser
 │   ├── ssh/                   # Remote SSH client and server manager
-│   ├── export/                # CSV writer
+│   ├── format/                # Result formatter
+│   ├── export/                # CSV and TXT writers
 │   └── model/                 # Shared data types
 ├── ui/                        # Fyne GUI components
 ├── docs/

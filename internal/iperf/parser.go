@@ -38,11 +38,23 @@ type iperfTimestamp struct {
 }
 
 type iperfEnd struct {
-	SumSent     iperfSum `json:"sum_sent"`
-	SumReceived iperfSum `json:"sum_received"`
+	SumSent     iperfSum        `json:"sum_sent"`
+	SumReceived iperfSum        `json:"sum_received"`
+	Streams     []iperfStreamEnd `json:"streams"`
 }
 
 type iperfSum struct {
+	BitsPerSecond float64 `json:"bits_per_second"`
+	Retransmits   int     `json:"retransmits"`
+}
+
+type iperfStreamEnd struct {
+	Sender   iperfStreamSide `json:"sender"`
+	Receiver iperfStreamSide `json:"receiver"`
+}
+
+type iperfStreamSide struct {
+	Socket        int     `json:"socket"`
 	BitsPerSecond float64 `json:"bits_per_second"`
 	Retransmits   int     `json:"retransmits"`
 }
@@ -71,6 +83,15 @@ func ParseResult(jsonData []byte) (*model.TestResult, error) {
 	if len(out.Start.Connected) > 0 {
 		result.ServerAddr = out.Start.Connected[0].RemoteHost
 		result.Port = out.Start.Connected[0].RemotePort
+	}
+
+	for i, s := range out.End.Streams {
+		result.Streams = append(result.Streams, model.StreamResult{
+			ID:          i + 1,
+			SentBps:     s.Sender.BitsPerSecond,
+			ReceivedBps: s.Receiver.BitsPerSecond,
+			Retransmits: s.Sender.Retransmits,
+		})
 	}
 
 	if out.Error != "" {

@@ -1,7 +1,7 @@
 # Updated Study Conspect: iperf-tool Go Architecture
 
-**Status:** Based on actual codebase analysis (24 Go files, ~2500 LOC)
-**Last Updated:** February 2025
+**Status:** Based on actual codebase analysis (~30 Go files, ~3000 LOC)
+**Last Updated:** February 2026
 **Purpose:** Understanding real Go patterns through a production utility
 
 ---
@@ -16,7 +16,10 @@
 2. **Wrap external processes** (iperf3) safely with input validation
 3. **Manage remote systems** via SSH with automatic dependency installation
 4. **Execute long-running operations** asynchronously without blocking UI
-5. **Export data** to standard formats (CSV)
+5. **Export data** to standard formats (CSV, TXT)
+6. **Format output** with per-stream throughput breakdown
+7. **Persist preferences** across app restarts (Fyne Preferences API)
+8. **Thread-safe UI updates** using `fyne.Do()` for goroutine-to-UI marshalling
 
 ### Architecture Summary
 
@@ -32,15 +35,16 @@
                    [Shared Core Engine]
          - iperf3 execution (spawn process, parse JSON)
          - SSH remote management (connect, install, start/stop server)
-         - CSV export (append-mode logging)
-         - Data models (test results)
+         - Result formatting (per-stream breakdown)
+         - CSV/TXT export (append-mode logging)
+         - Data models (test results with per-stream data)
 ```
 
 ### Key Components
 
 | Component | Purpose | Files |
 |-----------|---------|-------|
-| **Core (internal/)** | Domain logic, no UI/CLI awareness | 14 files |
+| **Core (internal/)** | Domain logic, no UI/CLI awareness | 18 files |
 | **CLI (internal/cli)** | Command-line flag parsing, test orchestration | 4 files |
 | **GUI (ui/)** | Fyne graphical interface components | 6 files |
 | **Entry Point** | Mode detection and routing | main.go |
@@ -52,8 +56,9 @@
 ✅ **SSH abstraction** (golang.org/x/crypto/ssh)
 ✅ **Dual-mode applications** (shared logic + multiple frontends)
 ✅ **Input validation patterns** (fail-fast approach)
-✅ **Goroutine safety** (mutexes for state sharing)
+✅ **Goroutine safety** (mutexes for state sharing, `fyne.Do()` for UI thread marshalling)
 ✅ **Streaming data** (callbacks instead of channels)
+✅ **Preferences persistence** (Fyne Preferences API)
 ✅ **Go testing practices** (table-driven tests, temp directories)
 
 ---
@@ -70,12 +75,15 @@ iperf-tool/
 ├── internal/                  # Private packages (not importable by others)
 │   │
 │   ├── model/                 # Data types
-│   │   └── result.go          # TestResult struct (represents one test execution)
+│   │   └── result.go          # TestResult + StreamResult structs
 │   │
 │   ├── iperf/                 # iperf3 execution engine
 │   │   ├── config.go          # IperfConfig struct + validation rules
 │   │   ├── runner.go          # Spawns iperf3 process, handles pipes
-│   │   └── parser.go          # Parses iperf3 JSON → TestResult
+│   │   └── parser.go          # Parses iperf3 JSON → TestResult (incl. per-stream)
+│   │
+│   ├── format/                # Output formatting
+│   │   └── result.go          # FormatResult() — human-readable per-stream output
 │   │
 │   ├── ssh/                   # Remote server management
 │   │   ├── client.go          # SSH connection wrapper
@@ -83,19 +91,20 @@ iperf-tool/
 │   │   └── install.go         # OS detection + package manager selection
 │   │
 │   ├── export/                # Data persistence
-│   │   └── csv.go             # CSV writer with append logic
+│   │   ├── csv.go             # CSV writer with append logic
+│   │   └── txt.go             # TXT writer using FormatResult
 │   │
 │   └── cli/                   # Command-line interface
 │       ├── flags.go           # Flag parsing + help text
 │       └── runner.go          # CLI test execution orchestration
 │
 ├── ui/                        # Fyne GUI components (public package for demo purposes)
-│   ├── app.go                 # Main window builder
-│   ├── config_form.go         # Server address + test params input
+│   ├── app.go                 # Main window builder + preferences wiring
+│   ├── config_form.go         # Server address + test params input + Load/SavePreferences
 │   ├── controls.go            # Start/Stop/Export buttons + test runner
-│   ├── output_view.go         # Live scrolling output display
-│   ├── history_view.go        # Results table (with Mutex for thread-safety)
-│   └── remote_panel.go        # SSH connection + remote server management UI
+│   ├── output_view.go         # Live scrolling output display (fyne.Do thread-safe)
+│   ├── history_view.go        # Results table (Mutex + fyne.Do for thread-safety)
+│   └── remote_panel.go        # SSH control UI + Load/SavePreferences
 │
 └── docs/                      # Documentation
     ├── CLI.md                 # Command-line reference
@@ -108,12 +117,13 @@ iperf-tool/
 
 | Package | Responsibility | Dependencies |
 |---------|-----------------|--------------|
-| **internal/model** | Represent test results | None (leaf) |
+| **internal/model** | Represent test results (incl. per-stream) | None (leaf) |
 | **internal/iperf** | Execute iperf3, parse output | model |
+| **internal/format** | Format results for display | model |
 | **internal/ssh** | Remote system access via SSH | None |
-| **internal/export** | Persist test data | model |
-| **internal/cli** | Parse flags, orchestrate tests | iperf, ssh, export, model |
-| **ui** | Graphical interface | cli (indirectly), iperf, ssh, export, model |
+| **internal/export** | Persist test data (CSV, TXT) | model, format |
+| **internal/cli** | Parse flags, orchestrate tests | iperf, ssh, export, format, model |
+| **ui** | Graphical interface | iperf, ssh, export, format, model |
 | **main** | Route to GUI or CLI | ui, cli |
 
 ### Dependency Graph (Simplified)
@@ -234,18 +244,33 @@ However, implicit interfaces are satisfied:
 **In iperf-tool:**
 
 ```go
-// internal/model/result.go - VALUE RECEIVER (read-only)
+// internal/model/result.go - POINTER RECEIVER
+type StreamResult struct {
+    ID          int
+    SentBps     float64
+    ReceivedBps float64
+    Retransmits int
+}
+
+func (s *StreamResult) SentMbps() float64 {
+    return s.SentBps / 1_000_000
+}
+
 type TestResult struct {
     Timestamp   time.Time
     ServerAddr  string
     SentBps     float64
+    Streams     []StreamResult
     // ... more fields
 }
 
-// Compute derived values (no modification)
+// Compute derived values
 func (r *TestResult) SentMbps() float64 {
     return r.SentBps / 1_000_000
 }
+
+// Verify per-stream totals match summary within 0.1% tolerance
+func (r *TestResult) VerifyStreamTotals() (sentOK, recvOK bool) { ... }
 
 // internal/iperf/config.go - POINTER RECEIVER (validation)
 type IperfConfig struct {
@@ -280,7 +305,8 @@ func (c *IperfConfig) ToArgs() []string {
 
 **In this project:**
 
-- `TestResult`: **value receiver** (small, read-only) — `SentMbps()`, `ReceivedMbps()`, `Status()`
+- `TestResult`: **pointer receiver** — `SentMbps()`, `ReceivedMbps()`, `Status()`, `VerifyStreamTotals()`
+- `StreamResult`: **pointer receiver** — `SentMbps()`, `ReceivedMbps()`
 - `IperfConfig`: **pointer receiver** (validation method) — `Validate()`, but `ToArgs()` is also pointer
 - `Controls`: **pointer receiver** (contains `sync.Mutex`, must not copy)
 - `HistoryView`: **pointer receiver** (contains `sync.Mutex` + mutable `[]TestResult`)
@@ -466,8 +492,9 @@ go func() {
 
 **Thread-safety:**
 
-- `c.outputView.AppendLine()` updates a Fyne widget (thread-safe by Fyne)
-- `c.historyView.AddResult()` uses `HistoryView.mu` to protect the results slice
+- `c.outputView.AppendLine()` uses `fyne.Do()` to marshal `SetText` calls to the main thread
+- `c.historyView.AddResult()` uses `HistoryView.mu` to protect the results slice + `fyne.Do()` for `table.Refresh()`
+- `c.resetState()` uses `fyne.Do()` for button Enable/Disable calls
 
 #### Goroutine 2: Remote Installation (Non-blocking UI)
 
@@ -1004,9 +1031,9 @@ cli.RemoteServerRunner
 
 ---
 
-### 4.3 `internal/export` — CSV Persistence
+### 4.3 `internal/export` — CSV and TXT Persistence
 
-**Responsibility:** Write test results to CSV file with append semantics.
+**Responsibility:** Write test results to CSV file with append semantics and TXT files with formatted output.
 
 **Internal structure:**
 
@@ -1015,6 +1042,10 @@ WriteCSV(path string, results []TestResult) error
     ├── Check if file exists
     ├── If new: write headers
     └── Append rows
+
+WriteTXT(path string, results []TestResult) error
+    ├── Format each result via format.FormatResult()
+    └── Write all to file separated by blank lines
 ```
 
 **Key function:**
@@ -1082,13 +1113,14 @@ func WriteCSV(path string, results []model.TestResult) error {
 
 ```
 ui.controls.onExport()
-    └── → export.WriteCSV(path, historyView.Results())
+    ├── → export.WriteCSV(path, historyView.Results())
+    └── → export.WriteTXT(txtPath, historyView.Results())
 
 cli.LocalTestRunner()
     └── → export.WriteCSV(cfg.OutputCSV, []TestResult{result})
 ```
 
-**Code reference:** `internal/export/csv.go`
+**Code references:** `internal/export/csv.go`, `internal/export/txt.go`
 
 ---
 
@@ -1323,32 +1355,26 @@ func BuildMainWindow(app fyne.App) fyne.Window {
     remotePanel := NewRemotePanel()
     controls := NewControls(configForm, outputView, historyView, remotePanel)
 
-    // Step 2: Assemble into layouts
-    leftPanel := container.NewVBox(
-        configForm.Container(),
-        controls.Container(),
-    )
-    rightPanel := container.NewVBox(
-        remotePanel.Container(),
-    )
+    // Step 2: Load persistent preferences
+    prefs := app.Preferences()
+    configForm.LoadPreferences(prefs)
+    remotePanel.LoadPreferences(prefs)
 
-    // Step 3: Split layout
+    // Step 3: Assemble into layouts
+    leftPanel := container.NewVBox(...)
+    rightPanel := container.NewVBox(...)
     topRow := container.NewHSplit(leftPanel, rightPanel)
-    topRow.SetOffset(0.6)
-
-    // Step 4: Tabbed layout
-    tabs := container.NewAppTabs(
-        container.NewTabItem("Live Output", outputView.Container()),
-        container.NewTabItem("History", historyView.Container()),
-    )
-
-    // Step 5: Main split
+    tabs := container.NewAppTabs(...)
     content := container.NewVSplit(topRow, tabs)
-    content.SetOffset(0.45)
 
-    // Step 6: Set window content
+    // Step 4: Set window content + save on close
     win := app.NewWindow()
     win.SetContent(content)
+    win.SetCloseIntercept(func() {
+        configForm.SavePreferences(prefs)
+        remotePanel.SavePreferences(prefs)
+        win.Close()
+    })
     return win
 }
 ```
@@ -1477,26 +1503,23 @@ go func() {
 
 If callback blocks, scanner is blocked.
 
-❌ **Fyne's thread model** — GUI updates must happen on main thread:
+✅ **Fyne's thread model** — GUI updates are marshalled to the main thread via `fyne.Do()`:
 
 ```go
-c.outputView.AppendLine(line)  // Called from worker goroutine
-```
-
-Works (Fyne handles thread marshalling internally) but fragile. Better to use channels:
-
-```go
-go func() {
-    for scanner.Scan() {
-        lineCh <- scanner.Text()
-    }
-}()
-
-// Main goroutine
-for line := range lineCh {
-    c.outputView.AppendLine(line)
+// ui/output_view.go — safe to call from any goroutine
+func (ov *OutputView) AppendLine(line string) {
+    fyne.Do(func() {
+        current := ov.text.Text
+        if current != "" {
+            current += "\n"
+        }
+        ov.text.SetText(current + line)
+        ov.scrollBox.ScrollToBottom()
+    })
 }
 ```
+
+`fyne.Do()` (added in Fyne v2.5) queues the function to execute on the main thread, preventing deadlocks that occur when widget methods like `SetText`, `Enable`, `Disable`, or `Refresh` are called from background goroutines.
 
 ---
 
@@ -1962,9 +1985,9 @@ func TestE2E_LocalTest(t *testing.T) {
 
 ✅ **SSH in Go** — `golang.org/x/crypto/ssh` is powerful; easy to abstract
 
-✅ **Goroutine safety** — `sync.Mutex` for shared state; `context.Context` for cancellation
+✅ **Goroutine safety** — `sync.Mutex` for shared state; `context.Context` for cancellation; `fyne.Do()` for UI thread marshalling
 
-✅ **CSV persistence** — Standard library `encoding/csv` is sufficient
+✅ **CSV/TXT persistence** — Standard library `encoding/csv` + formatted text output
 
 ✅ **Input validation** — Fail-fast before expensive operations
 
@@ -1987,6 +2010,10 @@ func TestE2E_LocalTest(t *testing.T) {
 ✅ **Callbacks** — Inversion of control for streaming data
 
 ✅ **Mutex for safety** — Protect shared state from concurrent access
+
+✅ **`fyne.Do()` for thread safety** — Marshal UI updates from goroutines to main thread
+
+✅ **Preferences API** — `app.Preferences()` for persistent form state via `SetCloseIntercept`
 
 ### 8.3 Anti-Patterns Demonstrated
 
@@ -2036,12 +2063,14 @@ func TestE2E_LocalTest(t *testing.T) {
 **iperf-tool** is a well-structured, educational Go project that demonstrates:
 
 - **Practical process management** (spawning, piping, cancellation)
-- **Network operations** (SSH, JSON parsing, CSV export)
-- **Concurrent design** (goroutines, mutexes, callbacks)
+- **Network operations** (SSH, JSON parsing, CSV/TXT export)
+- **Concurrent design** (goroutines, mutexes, callbacks, `fyne.Do()`)
 - **Dual-mode architecture** (CLI + GUI from shared core)
 - **Clean error handling** (wrapping, validation-first)
+- **Per-stream data parsing** (nested JSON structures → flat model)
+- **Preferences persistence** (Fyne Preferences API with `SetCloseIntercept`)
 
-Its strengths: simplicity, cohesion, working examples of idiomatic Go.
+Its strengths: simplicity, cohesion, working examples of idiomatic Go, proper thread-safe GUI updates.
 
 Its weaknesses: lack of interfaces limits testability; no channels limits parallelism; silent errors hide bugs; GUI untested.
 
@@ -2051,6 +2080,6 @@ For a learning project, it's valuable; for production, address the architectural
 
 **End of Updated Study Conspect**
 
-Version: 1.0
-Last Updated: February 2025
-Accuracy: 100% based on code analysis (24 Go files, ~2500 LOC)
+Version: 2.0
+Last Updated: February 2026
+Accuracy: 100% based on code analysis (~30 Go files, ~3000 LOC)

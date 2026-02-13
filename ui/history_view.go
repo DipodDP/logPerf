@@ -44,12 +44,14 @@ func (hv *HistoryView) Container() *widget.Table {
 	return hv.table
 }
 
-// AddResult appends a test result to the history.
+// AddResult appends a test result to the history, safe to call from any goroutine.
 func (hv *HistoryView) AddResult(r model.TestResult) {
 	hv.mu.Lock()
 	hv.results = append(hv.results, r)
 	hv.mu.Unlock()
-	hv.table.Refresh()
+	fyne.Do(func() {
+		hv.table.Refresh()
+	})
 }
 
 // Results returns a copy of all stored results.

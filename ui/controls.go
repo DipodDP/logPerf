@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"iperf-tool/internal/export"
+	"iperf-tool/internal/format"
 	"iperf-tool/internal/iperf"
 	"iperf-tool/internal/model"
 )
@@ -121,10 +123,8 @@ func (c *Controls) onStart() {
 			return
 		}
 
-		c.outputView.AppendLine(fmt.Sprintf(
-			"\nDone. Sent: %.2f Mbps | Received: %.2f Mbps | Retransmits: %d",
-			result.SentMbps(), result.ReceivedMbps(), result.Retransmits,
-		))
+		c.outputView.Clear()
+		c.outputView.AppendLine(format.FormatResult(result))
 
 		c.historyView.AddResult(*result)
 	}()
@@ -156,9 +156,16 @@ func (c *Controls) onExport() {
 			writer.Close()
 
 			if exportErr := export.WriteCSV(path, results); exportErr != nil {
-				c.outputView.AppendLine(fmt.Sprintf("Export error: %v", exportErr))
+				c.outputView.AppendLine(fmt.Sprintf("CSV export error: %v", exportErr))
+				return
+			}
+			c.outputView.AppendLine(fmt.Sprintf("Exported %d results to %s", len(results), path))
+
+			txtPath := strings.TrimSuffix(path, ".csv") + ".txt"
+			if exportErr := export.WriteTXT(txtPath, results); exportErr != nil {
+				c.outputView.AppendLine(fmt.Sprintf("TXT export error: %v", exportErr))
 			} else {
-				c.outputView.AppendLine(fmt.Sprintf("Exported %d results to %s", len(results), path))
+				c.outputView.AppendLine(fmt.Sprintf("Exported %d results to %s", len(results), txtPath))
 			}
 		}, win[0])
 	}
@@ -169,6 +176,8 @@ func (c *Controls) resetState() {
 	c.state = stateIdle
 	c.cancel = nil
 	c.mu.Unlock()
-	c.startBtn.Enable()
-	c.stopBtn.Disable()
+	fyne.Do(func() {
+		c.startBtn.Enable()
+		c.stopBtn.Disable()
+	})
 }

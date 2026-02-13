@@ -157,7 +157,7 @@ See [INSTALLATION.md](INSTALLATION.md) for details.
 
 ### Results Format
 
-Test results are printed to stdout in human-readable format:
+Test results are printed to stdout in human-readable format with per-stream breakdown (when using multiple parallel streams):
 
 ```
 === Test Results ===
@@ -166,11 +166,21 @@ Server:          192.168.1.1:5201
 Protocol:        TCP
 Parallel:        4 streams
 Duration:        30 seconds
+
+--- Per-Stream Results ---
+Stream 1:  Sent: 235.12 Mbps  Received: 234.06 Mbps
+Stream 2:  Sent: 235.13 Mbps  Received: 234.06 Mbps
+Stream 3:  Sent: 235.12 Mbps  Received: 234.06 Mbps
+Stream 4:  Sent: 235.13 Mbps  Received: 234.07 Mbps
+
+--- Summary ---
 Sent:            940.50 Mbps
 Received:        936.25 Mbps
 Retransmits:     42
 ====================
 ```
+
+Per-stream section is only shown when using more than 1 parallel stream. A warning is displayed if per-stream totals don't match the summary values.
 
 ### CSV Export
 

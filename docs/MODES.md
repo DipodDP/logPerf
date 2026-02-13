@@ -21,8 +21,10 @@ Any flags provided → runs in headless command-line mode.
 | Feature | GUI | CLI |
 |---------|-----|-----|
 | **Interaction** | Graphical forms | Command-line flags |
-| **Real-time output** | Scrollable text widget | Stdout streaming (with `-v`) |
+| **Real-time output** | Scrollable text widget with formatted results | Stdout streaming (with `-v`) |
 | **Test history** | In-memory table | CSV file append |
+| **Preferences** | Persistent between restarts | N/A (flags per invocation) |
+| **Per-stream data** | Formatted on completion | Formatted on completion |
 | **Remote server** | Connect/install/start/stop buttons | Command composition |
 | **Ease of use** | Intuitive for humans | Ideal for scripting/automation |
 | **Batch testing** | One test at a time | Loop-friendly |
@@ -32,10 +34,13 @@ Any flags provided → runs in headless command-line mode.
 ## GUI Mode Features
 
 - **Configuration form** with all iperf3 parameters
+- **Persistent preferences** — form values saved between app restarts
 - **Live output view** showing real-time test progress
+- **Formatted results** — per-stream throughput breakdown on test completion
 - **History table** displaying all past test results
 - **Remote server panel** for SSH management (install, start, stop)
 - **One-click operations** (Start Test, Stop Test, Export CSV)
+- **Dual export** — CSV and TXT files created together
 - **Visual status indicators**
 
 → See [GUI usage](../README.md) for details

@@ -1,0 +1,18 @@
+=== Test Results ===
+Timestamp:       2026-02-13 14:05:11
+Server:          81.7.17.12:5201
+Protocol:        TCP
+Parallel:        4 streams
+Duration:        10 seconds
+
+--- Per-Stream Results ---
+Stream 1:  Sent: 7.44 Mbps  Received: 4.25 Mbps
+Stream 2:  Sent: 9.54 Mbps  Received: 4.35 Mbps
+Stream 3:  Sent: 4.30 Mbps  Received: 4.25 Mbps
+Stream 4:  Sent: 6.08 Mbps  Received: 4.25 Mbps
+
+--- Summary ---
+Sent:            27.35 Mbps
+Received:        17.09 Mbps
+Retransmits:     0
+====================

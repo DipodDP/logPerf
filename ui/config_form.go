@@ -78,6 +78,42 @@ func (cf *ConfigForm) Container() *fyne.Container {
 	return cf.form
 }
 
+// LoadPreferences restores form values from persistent preferences.
+func (cf *ConfigForm) LoadPreferences(prefs fyne.Preferences) {
+	if v := prefs.String("config.server_addr"); v != "" {
+		cf.serverEntry.SetText(v)
+	}
+	if v := prefs.String("config.port"); v != "" {
+		cf.portEntry.SetText(v)
+	}
+	if v := prefs.String("config.parallel"); v != "" {
+		cf.parallelEntry.SetSelected(v)
+	}
+	if v := prefs.String("config.interval"); v != "" {
+		cf.intervalEntry.SetText(v)
+	}
+	if v := prefs.String("config.duration"); v != "" {
+		cf.durationEntry.SetText(v)
+	}
+	if v := prefs.String("config.protocol"); v != "" {
+		cf.protocolRadio.SetSelected(v)
+	}
+	if v := prefs.String("config.binary"); v != "" {
+		cf.binaryEntry.SetText(v)
+	}
+}
+
+// SavePreferences persists form values to preferences.
+func (cf *ConfigForm) SavePreferences(prefs fyne.Preferences) {
+	prefs.SetString("config.server_addr", cf.serverEntry.Text)
+	prefs.SetString("config.port", cf.portEntry.Text)
+	prefs.SetString("config.parallel", cf.parallelEntry.Selected)
+	prefs.SetString("config.interval", cf.intervalEntry.Text)
+	prefs.SetString("config.duration", cf.durationEntry.Text)
+	prefs.SetString("config.protocol", cf.protocolRadio.Selected)
+	prefs.SetString("config.binary", cf.binaryEntry.Text)
+}
+
 // Config builds an IperfConfig from the current form values.
 func (cf *ConfigForm) Config() iperf.IperfConfig {
 	port, _ := strconv.Atoi(cf.portEntry.Text)
