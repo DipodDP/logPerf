@@ -3,12 +3,12 @@ package ui
 import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/widget"
 )
 
 // OutputView displays live scrolling output from iperf3.
+// Text is selectable and copiable.
 type OutputView struct {
-	text      *widget.Entry
+	text      *readOnlyEntry
 	scrollBox *container.Scroll
 }
 
@@ -16,9 +16,8 @@ type OutputView struct {
 func NewOutputView() *OutputView {
 	ov := &OutputView{}
 
-	ov.text = widget.NewMultiLineEntry()
+	ov.text = newReadOnlyEntry()
 	ov.text.Wrapping = fyne.TextWrapWord
-	ov.text.Disable() // read-only
 
 	ov.scrollBox = container.NewVScroll(ov.text)
 	ov.scrollBox.SetMinSize(fyne.NewSize(800, 250))
@@ -38,8 +37,15 @@ func (ov *OutputView) AppendLine(line string) {
 		if current != "" {
 			current += "\n"
 		}
-		ov.text.SetText(current + line)
-		ov.scrollBox.ScrollToBottom()
+		newText := current + line
+		ov.text.SetText(newText)
+		// Move cursor to end so the Entry's internal scroll shows the bottom.
+		ov.text.CursorRow = ov.text.CursorRow + len(newText)
+		ov.text.CursorColumn = 0
+		// Defer ScrollToBottom so layout recalculates content height first.
+		fyne.Do(func() {
+			ov.scrollBox.ScrollToBottom()
+		})
 	})
 }
 

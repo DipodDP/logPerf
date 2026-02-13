@@ -4,25 +4,54 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 
 	"iperf-tool/internal/model"
 )
 
 // Runner executes iperf3 commands.
-type Runner struct{}
+type Runner struct {
+	mu  sync.Mutex
+	cmd *exec.Cmd
+}
 
 // NewRunner creates a new Runner.
 func NewRunner() *Runner {
 	return &Runner{}
 }
 
+// Stop sends SIGTERM to the running iperf3 process, allowing it to finish
+// gracefully and produce a summary. This is equivalent to the test ending
+// normally when its duration expires.
+func (r *Runner) Stop() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cmd != nil && r.cmd.Process != nil {
+		r.cmd.Process.Signal(syscall.SIGTERM)
+	}
+}
+
+func (r *Runner) setCmd(cmd *exec.Cmd) {
+	r.mu.Lock()
+	r.cmd = cmd
+	r.mu.Unlock()
+}
+
+func (r *Runner) clearCmd() {
+	r.mu.Lock()
+	r.cmd = nil
+	r.mu.Unlock()
+}
+
 // Run executes iperf3 with JSON output and returns the raw JSON bytes.
-func (r *Runner) Run(ctx context.Context, cfg IperfConfig) ([]byte, error) {
+func (r *Runner) Run(_ context.Context, cfg IperfConfig) ([]byte, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -30,7 +59,9 @@ func (r *Runner) Run(ctx context.Context, cfg IperfConfig) ([]byte, error) {
 	args := cfg.ToArgs()
 	args = append(args, "-J")
 
-	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...)
+	cmd := exec.Command(cfg.BinaryPath, args...)
+	r.setCmd(cmd)
+	defer r.clearCmd()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -51,7 +82,7 @@ func (r *Runner) Run(ctx context.Context, cfg IperfConfig) ([]byte, error) {
 // RunWithPipe executes iperf3 with JSON output, calling onLine for each line
 // of stdout as it arrives (for live GUI updates). It returns the parsed
 // TestResult after the process completes.
-func (r *Runner) RunWithPipe(ctx context.Context, cfg IperfConfig, onLine func(string)) (*model.TestResult, error) {
+func (r *Runner) RunWithPipe(_ context.Context, cfg IperfConfig, onLine func(string)) (*model.TestResult, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -59,7 +90,9 @@ func (r *Runner) RunWithPipe(ctx context.Context, cfg IperfConfig, onLine func(s
 	args := cfg.ToArgs()
 	args = append(args, "-J")
 
-	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...)
+	cmd := exec.Command(cfg.BinaryPath, args...)
+	r.setCmd(cmd)
+	defer r.clearCmd()
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -141,7 +174,7 @@ func versionAtLeast(have, want string) bool {
 // RunWithIntervals executes iperf3 with --json-stream --forceflush, calling
 // onInterval for each interval measurement as it arrives. Returns the final
 // TestResult after the process completes.
-func (r *Runner) RunWithIntervals(ctx context.Context, cfg IperfConfig, onInterval func(*model.IntervalResult)) (*model.TestResult, error) {
+func (r *Runner) RunWithIntervals(_ context.Context, cfg IperfConfig, onInterval func(*model.IntervalResult)) (*model.TestResult, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -149,7 +182,9 @@ func (r *Runner) RunWithIntervals(ctx context.Context, cfg IperfConfig, onInterv
 	args := cfg.ToArgs()
 	args = append(args, "--json-stream", "--forceflush")
 
-	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...)
+	cmd := exec.Command(cfg.BinaryPath, args...)
+	r.setCmd(cmd)
+	defer r.clearCmd()
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -166,6 +201,8 @@ func (r *Runner) RunWithIntervals(ctx context.Context, cfg IperfConfig, onInterv
 	var result *model.TestResult
 	var intervals []model.IntervalResult
 	startMeta := &model.TestResult{}
+
+	var streamErr string
 
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
@@ -187,6 +224,9 @@ func (r *Runner) RunWithIntervals(ctx context.Context, cfg IperfConfig, onInterv
 			if onInterval != nil && !interval.Omitted {
 				onInterval(interval)
 			}
+		case "error":
+			// iperf3 reports errors as JSON string in data field
+			_ = json.Unmarshal(ev.Data, &streamErr)
 		case "end":
 			result, err = ParseEndData(ev.Data)
 			if err != nil {
@@ -198,6 +238,10 @@ func (r *Runner) RunWithIntervals(ctx context.Context, cfg IperfConfig, onInterv
 	waitErr := cmd.Wait()
 
 	if result == nil {
+		// No valid end event — report the stream error if we have one
+		if streamErr != "" {
+			return nil, fmt.Errorf("iperf3: %s", streamErr)
+		}
 		if waitErr != nil {
 			return nil, fmt.Errorf("iperf3 failed: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
 		}

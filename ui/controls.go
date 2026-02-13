@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -9,7 +8,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
 	"iperf-tool/internal/export"
@@ -25,15 +23,13 @@ const (
 	stateRunning
 )
 
-// Controls manages the Start/Stop/Export buttons and test execution.
+// Controls manages the Start/Stop buttons and test execution with auto-save.
 type Controls struct {
-	mu     sync.Mutex
-	state  testState
-	cancel context.CancelFunc
+	mu    sync.Mutex
+	state testState
 
-	startBtn  *widget.Button
-	stopBtn   *widget.Button
-	exportBtn *widget.Button
+	startBtn *widget.Button
+	stopBtn  *widget.Button
 
 	configForm  *ConfigForm
 	outputView  *OutputView
@@ -57,9 +53,8 @@ func NewControls(cf *ConfigForm, ov *OutputView, hv *HistoryView, rp *RemotePane
 	c.startBtn = widget.NewButton("Start Test", c.onStart)
 	c.stopBtn = widget.NewButton("Stop Test", c.onStop)
 	c.stopBtn.Disable()
-	c.exportBtn = widget.NewButton("Export CSV", c.onExport)
 
-	c.container = container.NewHBox(c.startBtn, c.stopBtn, c.exportBtn)
+	c.container = container.NewHBox(c.startBtn, c.stopBtn)
 	return c
 }
 
@@ -89,47 +84,31 @@ func (c *Controls) onStart() {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	c.mu.Lock()
-	c.cancel = cancel
-	c.mu.Unlock()
-
 	go func() {
 		defer c.resetState()
 
 		c.outputView.AppendLine(fmt.Sprintf("Starting iperf3 test to %s:%d ...", cfg.ServerAddr, cfg.Port))
 
-		// Try json-stream mode for live interval display
 		_, versionErr := iperf.CheckVersion(cfg.BinaryPath)
 		useStream := versionErr == nil
 
-		var result *model.TestResult
-		var err error
+		result, err := c.runTest(cfg, useStream)
 
-		if useStream {
-			c.outputView.AppendLine(format.FormatIntervalHeader())
-			c.outputView.AppendLine(strings.Repeat("-", 60))
-
-			result, err = c.runner.RunWithIntervals(ctx, cfg, func(interval *model.IntervalResult) {
-				c.outputView.AppendLine(format.FormatInterval(interval))
-			})
-		} else {
-			c.outputView.AppendLine(fmt.Sprintf("Note: %v", versionErr))
-			c.outputView.AppendLine("Falling back to standard JSON mode (no live intervals)")
-			result, err = c.runner.RunWithPipe(ctx, cfg, func(line string) {
-				c.outputView.AppendLine(line)
-			})
+		// If the server is busy and we have an SSH connection, restart and retry once.
+		if err != nil && isServerBusy(err) && c.remotePanel.IsConnected() {
+			c.outputView.AppendLine("Server is busy, restarting remote iperf3...")
+			if restartErr := c.remotePanel.RestartServer(); restartErr != nil {
+				c.outputView.AppendLine(fmt.Sprintf("Restart failed: %v", restartErr))
+			} else {
+				c.outputView.AppendLine("Server restarted, retrying test...")
+				time.Sleep(time.Second)
+				result, err = c.runTest(cfg, useStream)
+			}
 		}
 
 		if err != nil {
-			if ctx.Err() == context.Canceled {
-				c.outputView.AppendLine("Test cancelled.")
-				return
-			}
 			c.outputView.AppendLine(fmt.Sprintf("Error: %v", err))
-
-			// Store error result in history
-			c.historyView.AddResult(model.TestResult{
+			errResult := model.TestResult{
 				Timestamp:  time.Now(),
 				ServerAddr: cfg.ServerAddr,
 				Port:       cfg.Port,
@@ -137,69 +116,81 @@ func (c *Controls) onStart() {
 				Duration:   cfg.Duration,
 				Parallel:   cfg.Parallel,
 				Error:      err.Error(),
-			})
+			}
+			c.historyView.AddResult(errResult)
+			c.autoSave(&errResult)
 			return
 		}
 
 		if useStream {
-			// In stream mode, keep intervals visible and append summary
 			c.outputView.AppendLine("")
 			c.outputView.AppendLine(format.FormatResult(result))
 		} else {
-			// In fallback mode, replace raw JSON with formatted result
 			c.outputView.Clear()
 			c.outputView.AppendLine(format.FormatResult(result))
 		}
 
 		c.historyView.AddResult(*result)
+		c.autoSave(result)
 	}()
+}
+
+// runTest executes a single iperf3 test, printing live output along the way.
+func (c *Controls) runTest(cfg iperf.IperfConfig, useStream bool) (*model.TestResult, error) {
+	if useStream {
+		c.outputView.AppendLine(format.FormatIntervalHeader())
+		c.outputView.AppendLine(strings.Repeat("-", 60))
+		return c.runner.RunWithIntervals(nil, cfg, func(interval *model.IntervalResult) {
+			c.outputView.AppendLine(format.FormatInterval(interval))
+		})
+	}
+
+	c.outputView.AppendLine("Falling back to standard JSON mode (no live intervals)")
+	return c.runner.RunWithPipe(nil, cfg, func(line string) {
+		c.outputView.AppendLine(line)
+	})
+}
+
+func isServerBusy(err error) bool {
+	return strings.Contains(err.Error(), "server is busy")
 }
 
 func (c *Controls) onStop() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.cancel != nil {
-		c.cancel()
+	if c.state == stateRunning {
+		c.runner.Stop()
 	}
 }
 
-func (c *Controls) onExport() {
-	results := c.historyView.Results()
-	if len(results) == 0 {
-		c.outputView.AppendLine("No results to export.")
-		return
+func (c *Controls) autoSave(result *model.TestResult) {
+	const (
+		csvPath         = "iperf_results.csv"
+		txtPath         = "iperf_results.txt"
+		intervalLogPath = "iperf_results_log.csv"
+	)
+
+	if err := export.WriteCSV(csvPath, []model.TestResult{*result}); err != nil {
+		c.outputView.AppendLine(fmt.Sprintf("Auto-save CSV error: %v", err))
 	}
 
-	// Use a save dialog if we have a window; otherwise default path.
-	win := fyne.CurrentApp().Driver().AllWindows()
-	if len(win) > 0 {
-		dialog.ShowFileSave(func(writer fyne.URIWriteCloser, err error) {
-			if err != nil || writer == nil {
-				return
-			}
-			path := writer.URI().Path()
-			writer.Close()
-
-			if exportErr := export.WriteCSV(path, results); exportErr != nil {
-				c.outputView.AppendLine(fmt.Sprintf("CSV export error: %v", exportErr))
-				return
-			}
-			c.outputView.AppendLine(fmt.Sprintf("Exported %d results to %s", len(results), path))
-
-			txtPath := strings.TrimSuffix(path, ".csv") + ".txt"
-			if exportErr := export.WriteTXT(txtPath, results); exportErr != nil {
-				c.outputView.AppendLine(fmt.Sprintf("TXT export error: %v", exportErr))
-			} else {
-				c.outputView.AppendLine(fmt.Sprintf("Exported %d results to %s", len(results), txtPath))
-			}
-		}, win[0])
+	allResults := c.historyView.Results()
+	if err := export.WriteTXT(txtPath, allResults); err != nil {
+		c.outputView.AppendLine(fmt.Sprintf("Auto-save TXT error: %v", err))
 	}
+
+	if len(result.Intervals) > 0 {
+		if err := export.WriteIntervalLog(intervalLogPath, result.Intervals); err != nil {
+			c.outputView.AppendLine(fmt.Sprintf("Auto-save interval log error: %v", err))
+		}
+	}
+
+	c.outputView.AppendLine(fmt.Sprintf("Results saved to %s, %s", csvPath, txtPath))
 }
 
 func (c *Controls) resetState() {
 	c.mu.Lock()
 	c.state = stateIdle
-	c.cancel = nil
 	c.mu.Unlock()
 	fyne.Do(func() {
 		c.startBtn.Enable()

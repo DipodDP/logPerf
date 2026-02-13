@@ -23,7 +23,7 @@ type RemotePanel struct {
 	installBtn    *widget.Button
 	startSrvBtn   *widget.Button
 	stopSrvBtn    *widget.Button
-	statusLabel   *widget.Label
+	statusEntry *readOnlyEntry
 
 	client    *internalssh.Client
 	srvMgr    *internalssh.ServerManager
@@ -43,7 +43,7 @@ func NewRemotePanel() *RemotePanel {
 	rp.userEntry.SetPlaceHolder("username")
 
 	rp.keyPathEntry = widget.NewEntry()
-	rp.keyPathEntry.SetPlaceHolder("~/.ssh/id_rsa")
+	rp.keyPathEntry.SetPlaceHolder("auto (~/.ssh/id_*)")
 
 	rp.passwordEntry = widget.NewPasswordEntry()
 	rp.passwordEntry.SetPlaceHolder("password (optional)")
@@ -51,7 +51,9 @@ func NewRemotePanel() *RemotePanel {
 	rp.portEntry = widget.NewEntry()
 	rp.portEntry.SetText("5201")
 
-	rp.statusLabel = widget.NewLabel("Disconnected")
+	rp.statusEntry = newReadOnlyEntry()
+	rp.statusEntry.MultiLine = false
+	rp.statusEntry.SetText("Disconnected")
 
 	rp.connectBtn = widget.NewButton("Connect", rp.onConnect)
 	rp.disconnectBtn = widget.NewButton("Disconnect", rp.onDisconnect)
@@ -82,7 +84,7 @@ func NewRemotePanel() *RemotePanel {
 		widget.NewLabel("iperf3 Server Port"),
 		rp.portEntry,
 		container.NewHBox(rp.startSrvBtn, rp.stopSrvBtn),
-		rp.statusLabel,
+		rp.statusEntry,
 	)
 
 	return rp
@@ -126,18 +128,64 @@ func (rp *RemotePanel) onConnect() {
 		Password: rp.passwordEntry.Text,
 	}
 
-	client, err := internalssh.Connect(cfg)
-	if err != nil {
-		rp.statusLabel.SetText(fmt.Sprintf("Error: %v", err))
-		return
+	rp.connectBtn.Disable()
+	rp.statusEntry.SetText("Connecting...")
+
+	go func() {
+		client, err := internalssh.Connect(cfg)
+		if err != nil {
+			fyne.Do(func() {
+				rp.statusEntry.SetText(fmt.Sprintf("Error: %v", err))
+				rp.connectBtn.Enable()
+			})
+			return
+		}
+
+		// Check if iperf3 server is already running
+		running, _ := rp.srvMgr.CheckStatus(client)
+
+		fyne.Do(func() {
+			rp.client = client
+			rp.disconnectBtn.Enable()
+			rp.installBtn.Enable()
+			if running {
+				rp.statusEntry.SetText(fmt.Sprintf("Connected to %s (server running)", cfg.Host))
+				rp.stopSrvBtn.Enable()
+			} else {
+				rp.statusEntry.SetText(fmt.Sprintf("Connected to %s", cfg.Host))
+				rp.startSrvBtn.Enable()
+			}
+		})
+	}()
+}
+
+// RestartServer kills any stuck iperf3 processes on the remote host and
+// starts a fresh server. Returns nil if no SSH connection is active.
+func (rp *RemotePanel) RestartServer() error {
+	if rp.client == nil {
+		return fmt.Errorf("not connected via SSH")
 	}
 
-	rp.client = client
-	rp.statusLabel.SetText(fmt.Sprintf("Connected to %s", cfg.Host))
-	rp.connectBtn.Disable()
-	rp.disconnectBtn.Enable()
-	rp.installBtn.Enable()
-	rp.startSrvBtn.Enable()
+	port := 5201
+	if v := rp.portEntry.Text; v != "" {
+		fmt.Sscanf(v, "%d", &port)
+	}
+
+	if err := rp.srvMgr.RestartServer(rp.client, port); err != nil {
+		return err
+	}
+
+	fyne.Do(func() {
+		rp.statusEntry.SetText(fmt.Sprintf("Server restarted on port %d", port))
+		rp.startSrvBtn.Disable()
+		rp.stopSrvBtn.Enable()
+	})
+	return nil
+}
+
+// IsConnected returns whether an SSH connection is active.
+func (rp *RemotePanel) IsConnected() bool {
+	return rp.client != nil
 }
 
 func (rp *RemotePanel) onDisconnect() {
@@ -145,7 +193,7 @@ func (rp *RemotePanel) onDisconnect() {
 		rp.client.Close()
 		rp.client = nil
 	}
-	rp.statusLabel.SetText("Disconnected")
+	rp.statusEntry.SetText("Disconnected")
 	rp.connectBtn.Enable()
 	rp.disconnectBtn.Disable()
 	rp.installBtn.Disable()
@@ -164,11 +212,11 @@ func (rp *RemotePanel) onStartServer() {
 	}
 
 	if err := rp.srvMgr.StartServer(rp.client, port); err != nil {
-		rp.statusLabel.SetText(fmt.Sprintf("Error: %v", err))
+		rp.statusEntry.SetText(fmt.Sprintf("Error: %v", err))
 		return
 	}
 
-	rp.statusLabel.SetText(fmt.Sprintf("Server running on port %d", port))
+	rp.statusEntry.SetText(fmt.Sprintf("Server running on port %d", port))
 	rp.startSrvBtn.Disable()
 	rp.stopSrvBtn.Enable()
 }
@@ -179,11 +227,11 @@ func (rp *RemotePanel) onStopServer() {
 	}
 
 	if err := rp.srvMgr.StopServer(rp.client); err != nil {
-		rp.statusLabel.SetText(fmt.Sprintf("Error: %v", err))
+		rp.statusEntry.SetText(fmt.Sprintf("Error: %v", err))
 		return
 	}
 
-	rp.statusLabel.SetText("Server stopped")
+	rp.statusEntry.SetText("Server stopped")
 	rp.startSrvBtn.Enable()
 	rp.stopSrvBtn.Disable()
 }
@@ -194,17 +242,17 @@ func (rp *RemotePanel) onInstall() {
 	}
 
 	rp.installBtn.Disable()
-	rp.statusLabel.SetText("Installing iperf3...")
+	rp.statusEntry.SetText("Installing iperf3...")
 
 	go func() {
 		defer rp.installBtn.Enable()
 
 		if err := rp.client.InstallIperf3(); err != nil {
-			rp.statusLabel.SetText(fmt.Sprintf("Install failed: %v", err))
+			rp.statusEntry.SetText(fmt.Sprintf("Install failed: %v", err))
 			return
 		}
 
-		rp.statusLabel.SetText("iperf3 installed successfully")
+		rp.statusEntry.SetText("iperf3 installed successfully")
 	}()
 }
 

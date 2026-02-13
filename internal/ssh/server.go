@@ -76,6 +76,24 @@ func (m *ServerManager) CheckStatus(client *Client) (bool, error) {
 	return isRunning, nil
 }
 
+// RestartServer kills all iperf3 processes and starts a fresh server.
+func (m *ServerManager) RestartServer(client *Client, port int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Force-kill any existing iperf3 processes
+	client.RunCommand("pkill -9 iperf3")
+
+	cmd := fmt.Sprintf("iperf3 -s -p %d -D", port)
+	if _, err := client.RunCommand(cmd); err != nil {
+		return fmt.Errorf("restart remote iperf3 server: %w", err)
+	}
+
+	m.running = true
+	m.port = port
+	return nil
+}
+
 // IsRunning returns the locally tracked state.
 func (m *ServerManager) IsRunning() bool {
 	m.mu.Lock()
