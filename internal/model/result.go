@@ -5,6 +5,26 @@ import (
 	"time"
 )
 
+// IntervalResult holds a single interval measurement from an iperf3 test.
+type IntervalResult struct {
+	TimeStart    float64 // seconds from test start
+	TimeEnd      float64
+	Bytes        int64
+	BandwidthBps float64
+	Retransmits  int
+	Omitted      bool
+}
+
+// BandwidthMbps returns the interval bandwidth in Mbps.
+func (r *IntervalResult) BandwidthMbps() float64 {
+	return r.BandwidthBps / 1_000_000
+}
+
+// TransferMB returns the transferred data in megabytes.
+func (r *IntervalResult) TransferMB() float64 {
+	return float64(r.Bytes) / 1_000_000
+}
+
 // StreamResult holds per-stream throughput data.
 type StreamResult struct {
 	ID          int
@@ -36,6 +56,7 @@ type TestResult struct {
 	ReceivedBps float64
 	Retransmits int
 	Streams     []StreamResult
+	Intervals   []IntervalResult
 	Error       string
 }
 

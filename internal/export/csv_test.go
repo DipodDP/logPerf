@@ -85,6 +85,41 @@ func TestWriteCSV_Append(t *testing.T) {
 	}
 }
 
+func TestWriteIntervalLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "intervals.csv")
+
+	intervals := []model.IntervalResult{
+		{TimeStart: 0, TimeEnd: 1, Bytes: 117500000, BandwidthBps: 940_000_000, Retransmits: 3},
+		{TimeStart: 1, TimeEnd: 2, Bytes: 115000000, BandwidthBps: 920_000_000, Retransmits: 1},
+	}
+
+	if err := WriteIntervalLog(path, intervals); err != nil {
+		t.Fatalf("WriteIntervalLog() error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+
+	content := string(data)
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines (header + 2 rows), got %d", len(lines))
+	}
+
+	if !strings.HasPrefix(lines[0], "interval_start,") {
+		t.Errorf("unexpected header: %s", lines[0])
+	}
+	if !strings.Contains(lines[1], "940.00") {
+		t.Errorf("row 1 should contain bandwidth: %s", lines[1])
+	}
+	if !strings.Contains(lines[2], "920.00") {
+		t.Errorf("row 2 should contain bandwidth: %s", lines[2])
+	}
+}
+
 func TestWriteCSV_WithError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "results.csv")

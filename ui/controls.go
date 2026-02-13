@@ -99,9 +99,27 @@ func (c *Controls) onStart() {
 
 		c.outputView.AppendLine(fmt.Sprintf("Starting iperf3 test to %s:%d ...", cfg.ServerAddr, cfg.Port))
 
-		result, err := c.runner.RunWithPipe(ctx, cfg, func(line string) {
-			c.outputView.AppendLine(line)
-		})
+		// Try json-stream mode for live interval display
+		_, versionErr := iperf.CheckVersion(cfg.BinaryPath)
+		useStream := versionErr == nil
+
+		var result *model.TestResult
+		var err error
+
+		if useStream {
+			c.outputView.AppendLine(format.FormatIntervalHeader())
+			c.outputView.AppendLine(strings.Repeat("-", 60))
+
+			result, err = c.runner.RunWithIntervals(ctx, cfg, func(interval *model.IntervalResult) {
+				c.outputView.AppendLine(format.FormatInterval(interval))
+			})
+		} else {
+			c.outputView.AppendLine(fmt.Sprintf("Note: %v", versionErr))
+			c.outputView.AppendLine("Falling back to standard JSON mode (no live intervals)")
+			result, err = c.runner.RunWithPipe(ctx, cfg, func(line string) {
+				c.outputView.AppendLine(line)
+			})
+		}
 
 		if err != nil {
 			if ctx.Err() == context.Canceled {
@@ -123,8 +141,15 @@ func (c *Controls) onStart() {
 			return
 		}
 
-		c.outputView.Clear()
-		c.outputView.AppendLine(format.FormatResult(result))
+		if useStream {
+			// In stream mode, keep intervals visible and append summary
+			c.outputView.AppendLine("")
+			c.outputView.AppendLine(format.FormatResult(result))
+		} else {
+			// In fallback mode, replace raw JSON with formatted result
+			c.outputView.Clear()
+			c.outputView.AppendLine(format.FormatResult(result))
+		}
 
 		c.historyView.AddResult(*result)
 	}()

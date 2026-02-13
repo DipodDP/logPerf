@@ -63,6 +63,45 @@ func WriteCSV(path string, results []model.TestResult) error {
 	return nil
 }
 
+var intervalHeaders = []string{
+	"interval_start",
+	"interval_end",
+	"bandwidth_mbps",
+	"transfer_mb",
+	"retransmits",
+}
+
+// WriteIntervalLog writes interval measurements to a CSV file.
+func WriteIntervalLog(path string, intervals []model.IntervalResult) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create interval log: %w", err)
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	defer w.Flush()
+
+	if err := w.Write(intervalHeaders); err != nil {
+		return fmt.Errorf("write interval headers: %w", err)
+	}
+
+	for _, iv := range intervals {
+		row := []string{
+			fmt.Sprintf("%.1f", iv.TimeStart),
+			fmt.Sprintf("%.1f", iv.TimeEnd),
+			fmt.Sprintf("%.2f", iv.BandwidthMbps()),
+			fmt.Sprintf("%.2f", iv.TransferMB()),
+			strconv.Itoa(iv.Retransmits),
+		}
+		if err := w.Write(row); err != nil {
+			return fmt.Errorf("write interval row: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()

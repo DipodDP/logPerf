@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"iperf-tool/internal/export"
 	"iperf-tool/internal/format"
@@ -38,6 +39,8 @@ type RunnerConfig struct {
 }
 
 // LocalTestRunner runs a single iperf3 test locally and optionally saves results.
+// It uses --json-stream mode for live interval reporting when iperf3 >= 3.17,
+// falling back to -J mode otherwise.
 func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 	iperfCfg := iperf.IperfConfig{
 		BinaryPath: cfg.BinaryPath,
@@ -55,17 +58,51 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 
 	runner := iperf.NewRunner()
 
-	if cfg.Verbose {
-		fmt.Printf("Starting test: %s:%d (TCP, %d parallel, %ds duration)\n",
-			cfg.ServerAddr, cfg.Port, cfg.Parallel, cfg.Duration)
+	fmt.Printf("Starting test: %s:%d (%s, %d parallel, %ds duration)\n",
+		cfg.ServerAddr, cfg.Port, strings.ToUpper(cfg.Protocol), cfg.Parallel, cfg.Duration)
+
+	// Try json-stream mode first (iperf3 >= 3.17)
+	_, versionErr := iperf.CheckVersion(iperfCfg.BinaryPath)
+	if versionErr != nil {
+		fmt.Printf("Note: %v — falling back to standard JSON mode (no live intervals)\n", versionErr)
+		return localTestRunnerFallback(runner, iperfCfg, cfg)
 	}
 
+	fmt.Println(format.FormatIntervalHeader())
+	fmt.Println(strings.Repeat("-", 60))
+
+	result, err := runner.RunWithIntervals(context.Background(), iperfCfg, func(interval *model.IntervalResult) {
+		fmt.Println(format.FormatInterval(interval))
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if cfg.OutputCSV != "" {
+		if err := export.WriteCSV(cfg.OutputCSV, []model.TestResult{*result}); err != nil {
+			return result, fmt.Errorf("save CSV: %w", err)
+		}
+		// Write interval log alongside the main CSV
+		logPath := strings.TrimSuffix(cfg.OutputCSV, ".csv") + "_log.csv"
+		if err := export.WriteIntervalLog(logPath, result.Intervals); err != nil {
+			return result, fmt.Errorf("save interval log: %w", err)
+		}
+		if cfg.Verbose {
+			fmt.Printf("Results saved to: %s\n", cfg.OutputCSV)
+			fmt.Printf("Interval log saved to: %s\n", logPath)
+		}
+	}
+
+	return result, nil
+}
+
+// localTestRunnerFallback uses the legacy -J mode when --json-stream is unavailable.
+func localTestRunnerFallback(runner *iperf.Runner, iperfCfg iperf.IperfConfig, cfg RunnerConfig) (*model.TestResult, error) {
 	result, err := runner.RunWithPipe(context.Background(), iperfCfg, func(line string) {
 		if cfg.Verbose {
 			fmt.Println(line)
 		}
 	})
-
 	if err != nil {
 		return nil, err
 	}

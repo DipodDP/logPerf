@@ -21,7 +21,7 @@ Any flags provided → runs in headless command-line mode.
 | Feature | GUI | CLI |
 |---------|-----|-----|
 | **Interaction** | Graphical forms | Command-line flags |
-| **Real-time output** | Scrollable text widget with formatted results | Stdout streaming (with `-v`) |
+| **Real-time output** | Scrollable text widget with live interval data | Live interval lines printed to stdout |
 | **Test history** | In-memory table | CSV file append |
 | **Preferences** | Persistent between restarts | N/A (flags per invocation) |
 | **Per-stream data** | Formatted on completion | Formatted on completion |
@@ -35,8 +35,8 @@ Any flags provided → runs in headless command-line mode.
 
 - **Configuration form** with all iperf3 parameters
 - **Persistent preferences** — form values saved between app restarts
-- **Live output view** showing real-time test progress
-- **Formatted results** — per-stream throughput breakdown on test completion
+- **Live interval display** — real-time bandwidth, transfer, and retransmit data at each reporting interval (iperf3 3.17+)
+- **Formatted results** — per-stream throughput breakdown appended on test completion
 - **History table** displaying all past test results
 - **Remote server panel** for SSH management (install, start, stop)
 - **One-click operations** (Start Test, Stop Test, Export CSV)
@@ -51,7 +51,8 @@ Any flags provided → runs in headless command-line mode.
 - **SSH integration** (install, start, stop remote servers)
 - **Batch automation** (run multiple tests in loops)
 - **Scripting-friendly** (exit codes, CSV output, no UI blocking)
-- **Verbose mode** (show live iperf3 output with `-v`)
+- **Live interval output** (bandwidth/transfer/retransmits per interval with iperf3 3.17+)
+- **Verbose mode** (additional status messages with `-v`)
 - **Remote operations** (install iperf3, manage servers)
 
 → See [CLI.md](CLI.md) for complete flag reference and examples
@@ -119,10 +120,11 @@ iperf-tool  # Open GUI and import batch.csv
 ### shared Components
 
 Both modes use the same core engine:
-- `internal/iperf` — runner and parser
+- `internal/iperf` — runner and parser (supports both `-J` and `--json-stream` modes)
 - `internal/ssh` — remote control
-- `internal/export` — CSV writing
-- `internal/model` — result structs
+- `internal/export` — CSV writing (summary + interval logs)
+- `internal/format` — result and interval formatting
+- `internal/model` — result structs (TestResult, IntervalResult, StreamResult)
 
 ### Independence
 

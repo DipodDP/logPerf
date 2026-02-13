@@ -7,6 +7,17 @@ import (
 	"iperf-tool/internal/model"
 )
 
+// FormatIntervalHeader returns a header line for interval output.
+func FormatIntervalHeader() string {
+	return fmt.Sprintf("%-20s %12s %12s %12s", "Interval", "Bandwidth", "Transfer", "Retransmits")
+}
+
+// FormatInterval produces a single formatted line for an interval measurement.
+func FormatInterval(r *model.IntervalResult) string {
+	return fmt.Sprintf("[%5.1f-%5.1f sec]  %8.2f Mbps %8.2f MB   %d retransmits",
+		r.TimeStart, r.TimeEnd, r.BandwidthMbps(), r.TransferMB(), r.Retransmits)
+}
+
 // FormatResult produces a human-readable formatted output of a test result.
 func FormatResult(r *model.TestResult) string {
 	var b strings.Builder

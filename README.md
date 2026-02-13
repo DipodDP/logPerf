@@ -11,7 +11,8 @@ A cross-platform Go application with **GUI and CLI** that wraps iperf3 for netwo
 ✅ **iperf3 Wrapping**
 - Local client tests with configurable parameters
 - JSON output parsing
-- Live streaming of results
+- **Live interval reporting** — real-time bandwidth, transfer, and retransmit data at each reporting interval (iperf3 3.17+ with `--json-stream`)
+- Automatic fallback to standard JSON mode for older iperf3 versions
 
 ✅ **Remote Server Management**
 - SSH connection to remote hosts
@@ -26,6 +27,7 @@ A cross-platform Go application with **GUI and CLI** that wraps iperf3 for netwo
 ✅ **Data Export**
 - CSV output with append mode for continuous logging
 - TXT log export alongside CSV with formatted results
+- **Interval log CSV** — per-interval measurements saved to `<name>_log.csv` alongside main results
 - Excel-compatible format
 
 ✅ **Preferences Persistence**
@@ -67,6 +69,7 @@ See [docs/CLI.md](docs/CLI.md) for full reference.
 
 ### Local Testing
 - iperf3 installed and in PATH
+- iperf3 **3.17+** recommended for live interval reporting (`--json-stream` support); older versions fall back to standard JSON mode
 - Go 1.22+ (to build)
 
 ### GUI Mode
@@ -99,7 +102,7 @@ GOOS=windows GOARCH=amd64 go build -o iperf-tool.exe
 1. Run `iperf-tool` with no arguments
 2. Fill in server address and parameters (values persist between restarts)
 3. Click "Start Test"
-4. View live output in "Live Output" tab — formatted with per-stream data on completion
+4. View **live interval measurements** in "Live Output" tab as the test runs (bandwidth, transfer, retransmits per interval), followed by the full summary on completion
 5. Check "History" tab for past results
 6. Click "Export CSV" to save results (also creates a `.txt` file alongside)
 
@@ -183,15 +186,17 @@ iperf-tool/
 
 ## Testing
 
-24 tests across all internal packages:
+35 tests across all internal packages:
 ```bash
 go test ./internal/... -v
 ```
 
 Coverage includes:
 - Config validation and argument generation
-- iperf3 JSON parsing with fixtures
-- CSV export format
+- iperf3 JSON parsing with fixtures (standard and `--json-stream` modes)
+- Stream event parsing (start, interval, end events)
+- Interval formatting
+- CSV export format (summary and interval logs)
 - SSH connection and remote operations
 - CLI flag parsing
 - Remote OS detection and package manager selection
@@ -246,6 +251,7 @@ iperf-tool -ssh test-server -user root -key key.pem -stop-server
 - **iperf3 only** (not iperf2)
 - **Installed binary required** (no built-in iperf3)
 - **One remote server per connection** (separate SSH sessions needed for multiple)
+- **Live intervals require iperf3 3.17+** (older versions fall back to batch JSON mode with no live progress)
 
 ## Future Enhancements
 
@@ -272,6 +278,9 @@ Ensure CGO is enabled and build tools are installed.
 
 ### CLI test shows no output
 Use `-v` flag for verbose output: `iperf-tool -c server -v`
+
+### "iperf3 X.XX found, but --json-stream requires >= 3.17"
+Live interval reporting needs iperf3 3.17+. The tool falls back to standard JSON mode automatically. To get live intervals, upgrade iperf3 from source or a PPA.
 
 ## License
 

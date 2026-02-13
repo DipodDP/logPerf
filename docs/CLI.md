@@ -67,7 +67,7 @@ iperf-tool -h
 | Flag | Long Form | Description | Default |
 |------|-----------|-------------|---------|
 | `-o` | `-output` | Save results to CSV file | - |
-| `-v` | `-verbose` | Verbose output (show live iperf3 output) | false |
+| `-v` | `-verbose` | Verbose output (show raw iperf3 output in fallback mode, extra status messages) | false |
 
 ## Examples
 
@@ -89,11 +89,19 @@ iperf-tool -c 10.0.0.1 -u udp -t 20 -P 4
 ```
 20-second UDP test with 4 parallel streams.
 
-### 4. Test with verbose output
+### 4. Test with live interval output
 ```bash
-iperf-tool -c 192.168.1.1 -t 30 -v
+iperf-tool -c 192.168.1.1 -t 30
 ```
-Prints live iperf3 output as it runs.
+With iperf3 3.17+, live interval measurements are printed as the test runs:
+```
+Interval                Bandwidth     Transfer  Retransmits
+------------------------------------------------------------
+[  0.0-  1.0 sec]    940.25 Mbps   117.53 MB   0 retransmits
+[  1.0-  2.0 sec]    938.10 Mbps   117.26 MB   2 retransmits
+...
+```
+Older iperf3 versions fall back to standard JSON mode (use `-v` to see raw output).
 
 ### 5. Install iperf3 and start server
 ```bash
@@ -157,9 +165,17 @@ See [INSTALLATION.md](INSTALLATION.md) for details.
 
 ### Results Format
 
-Test results are printed to stdout in human-readable format with per-stream breakdown (when using multiple parallel streams):
+With iperf3 3.17+, live interval measurements are displayed during the test, followed by the final summary:
 
 ```
+Starting test: 192.168.1.1:5201 (TCP, 4 parallel, 30s duration)
+Interval                Bandwidth     Transfer  Retransmits
+------------------------------------------------------------
+[  0.0-  1.0 sec]    920.15 Mbps   115.02 MB   3 retransmits
+[  1.0-  2.0 sec]    940.25 Mbps   117.53 MB   0 retransmits
+[  2.0-  3.0 sec]    938.10 Mbps   117.26 MB   2 retransmits
+...
+
 === Test Results ===
 Timestamp:       2024-01-15 14:30:45
 Server:          192.168.1.1:5201
@@ -182,6 +198,8 @@ Retransmits:     42
 
 Per-stream section is only shown when using more than 1 parallel stream. A warning is displayed if per-stream totals don't match the summary values.
 
+With older iperf3 versions (< 3.17), the tool falls back to standard JSON mode — no live intervals are shown, but the final summary is identical.
+
 ### CSV Export
 
 With `-o results.csv`, results are appended to a CSV file:
@@ -192,6 +210,19 @@ Timestamp,Server,Port,Parallel,Duration,Protocol,Sent_Mbps,Received_Mbps,Retrans
 ```
 
 Multiple test runs append to the same file, creating a historical log.
+
+### Interval Log CSV
+
+When using `-o` with iperf3 3.17+, a companion interval log is automatically created at `<name>_log.csv`:
+
+```csv
+interval_start,interval_end,bandwidth_mbps,transfer_mb,retransmits
+0.0,1.0,920.15,115.02,3
+1.0,2.0,940.25,117.53,0
+2.0,3.0,938.10,117.26,2
+```
+
+This provides per-interval granularity for detailed analysis and graphing.
 
 ## Exit Codes
 
@@ -258,6 +289,12 @@ The remote user must be in sudoers (Linux/macOS) or have Administrator privilege
 
 ### "iperf3 command not found"
 Make sure iperf3 is installed on the local machine or remote server. Use `-install` flag for remote servers.
+
+### "iperf3 X.XX found, but --json-stream requires >= 3.17"
+Live interval reporting requires iperf3 3.17+. The tool automatically falls back to standard JSON mode. To get live intervals, upgrade iperf3:
+- **macOS**: `brew upgrade iperf3`
+- **Ubuntu/Debian**: Install from source or a PPA (default packages may be too old)
+- **Arch**: `pacman -Syu iperf3`
 
 ### "no supported package manager found"
 The remote system's package manager is not supported. Install iperf3 manually or check supported OS list.

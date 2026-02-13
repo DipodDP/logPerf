@@ -3,6 +3,8 @@ package iperf
 import (
 	"math"
 	"testing"
+
+	"iperf-tool/internal/model"
 )
 
 const sampleJSON = `{
@@ -143,5 +145,121 @@ func TestParseResultInvalidJSON(t *testing.T) {
 	_, err := ParseResult([]byte("not json"))
 	if err == nil {
 		t.Error("expected error for invalid JSON")
+	}
+}
+
+const sampleIntervalEvent = `{"event":"interval","data":{"streams":[{"socket":5,"start":0,"end":1,"seconds":1,"bytes":117500000,"bits_per_second":940000000,"retransmits":3,"omitted":false}],"sum":{"start":0,"end":1,"seconds":1,"bytes":117500000,"bits_per_second":940000000,"retransmits":3,"omitted":false}}}`
+
+func TestParseStreamEvent(t *testing.T) {
+	ev, err := ParseStreamEvent([]byte(sampleIntervalEvent))
+	if err != nil {
+		t.Fatalf("ParseStreamEvent() error: %v", err)
+	}
+	if ev.Event != "interval" {
+		t.Errorf("Event = %q, want %q", ev.Event, "interval")
+	}
+	if ev.Data == nil {
+		t.Fatal("Data should not be nil")
+	}
+}
+
+func TestParseStreamEventInvalid(t *testing.T) {
+	_, err := ParseStreamEvent([]byte("not json"))
+	if err == nil {
+		t.Error("expected error for invalid JSON")
+	}
+}
+
+func TestParseStreamEventMissingEvent(t *testing.T) {
+	_, err := ParseStreamEvent([]byte(`{"data":{}}`))
+	if err == nil {
+		t.Error("expected error for missing event field")
+	}
+}
+
+func TestParseIntervalData(t *testing.T) {
+	ev, _ := ParseStreamEvent([]byte(sampleIntervalEvent))
+	interval, err := ParseIntervalData(ev.Data)
+	if err != nil {
+		t.Fatalf("ParseIntervalData() error: %v", err)
+	}
+	if interval.TimeStart != 0 {
+		t.Errorf("TimeStart = %f, want 0", interval.TimeStart)
+	}
+	if interval.TimeEnd != 1 {
+		t.Errorf("TimeEnd = %f, want 1", interval.TimeEnd)
+	}
+	if interval.Bytes != 117500000 {
+		t.Errorf("Bytes = %d, want 117500000", interval.Bytes)
+	}
+	if math.Abs(interval.BandwidthBps-940000000) > 1 {
+		t.Errorf("BandwidthBps = %f, want 940000000", interval.BandwidthBps)
+	}
+	if interval.Retransmits != 3 {
+		t.Errorf("Retransmits = %d, want 3", interval.Retransmits)
+	}
+	if interval.Omitted {
+		t.Error("Omitted should be false")
+	}
+	if math.Abs(interval.BandwidthMbps()-940.0) > 0.01 {
+		t.Errorf("BandwidthMbps() = %f, want 940.0", interval.BandwidthMbps())
+	}
+}
+
+const sampleStartEvent = `{"event":"start","data":{"connected":[{"socket":5,"local_host":"192.168.1.100","local_port":43210,"remote_host":"192.168.1.1","remote_port":5201}],"test_start":{"protocol":"TCP","num_streams":1,"duration":10},"timestamp":{"timesecs":1704110400}}}`
+
+func TestParseStartData(t *testing.T) {
+	ev, _ := ParseStreamEvent([]byte(sampleStartEvent))
+	result := &model.TestResult{}
+	if err := ParseStartData(ev.Data, result); err != nil {
+		t.Fatalf("ParseStartData() error: %v", err)
+	}
+	if result.ServerAddr != "192.168.1.1" {
+		t.Errorf("ServerAddr = %q, want %q", result.ServerAddr, "192.168.1.1")
+	}
+	if result.Port != 5201 {
+		t.Errorf("Port = %d, want 5201", result.Port)
+	}
+	if result.Protocol != "TCP" {
+		t.Errorf("Protocol = %q, want %q", result.Protocol, "TCP")
+	}
+	if result.Parallel != 1 {
+		t.Errorf("Parallel = %d, want 1", result.Parallel)
+	}
+	if result.Duration != 10 {
+		t.Errorf("Duration = %d, want 10", result.Duration)
+	}
+}
+
+const sampleEndEvent = `{"event":"end","data":{"sum_sent":{"start":0,"end":10,"seconds":10,"bytes":1175000000,"bits_per_second":940000000,"retransmits":42,"sender":true},"sum_received":{"start":0,"end":10,"seconds":10,"bytes":1170000000,"bits_per_second":936000000,"sender":false},"streams":[{"sender":{"socket":5,"bits_per_second":940000000,"retransmits":42},"receiver":{"socket":5,"bits_per_second":936000000}}]}}`
+
+func TestParseEndData(t *testing.T) {
+	ev, _ := ParseStreamEvent([]byte(sampleEndEvent))
+	result, err := ParseEndData(ev.Data)
+	if err != nil {
+		t.Fatalf("ParseEndData() error: %v", err)
+	}
+	if math.Abs(result.SentBps-940000000) > 1 {
+		t.Errorf("SentBps = %f, want 940000000", result.SentBps)
+	}
+	if math.Abs(result.ReceivedBps-936000000) > 1 {
+		t.Errorf("ReceivedBps = %f, want 936000000", result.ReceivedBps)
+	}
+	if result.Retransmits != 42 {
+		t.Errorf("Retransmits = %d, want 42", result.Retransmits)
+	}
+	if len(result.Streams) != 1 {
+		t.Fatalf("Streams count = %d, want 1", len(result.Streams))
+	}
+}
+
+func TestParseIntervalDataOmitted(t *testing.T) {
+	data := `{"streams":[],"sum":{"start":0,"end":1,"seconds":1,"bytes":0,"bits_per_second":0,"retransmits":0,"omitted":true}}`
+	interval, err := ParseIntervalData([]byte(data))
+	if err != nil {
+		t.Fatalf("ParseIntervalData() error: %v", err)
+	}
+	if !interval.Omitted {
+		t.Error("Omitted should be true")
 	}
 }

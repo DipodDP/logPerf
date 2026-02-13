@@ -104,6 +104,42 @@ func TestFormatResultMismatchWarning(t *testing.T) {
 	}
 }
 
+func TestFormatIntervalHeader(t *testing.T) {
+	header := FormatIntervalHeader()
+	if !strings.Contains(header, "Interval") {
+		t.Error("header should contain 'Interval'")
+	}
+	if !strings.Contains(header, "Bandwidth") {
+		t.Error("header should contain 'Bandwidth'")
+	}
+}
+
+func TestFormatInterval(t *testing.T) {
+	interval := &model.IntervalResult{
+		TimeStart:    0,
+		TimeEnd:      1,
+		Bytes:        117500000,
+		BandwidthBps: 940_000_000,
+		Retransmits:  3,
+		Omitted:      false,
+	}
+
+	out := FormatInterval(interval)
+
+	if !strings.Contains(out, "0.0") {
+		t.Error("should contain start time")
+	}
+	if !strings.Contains(out, "1.0 sec") {
+		t.Error("should contain end time")
+	}
+	if !strings.Contains(out, "940.00 Mbps") {
+		t.Errorf("should contain bandwidth, got: %s", out)
+	}
+	if !strings.Contains(out, "3 retransmits") {
+		t.Error("should contain retransmits")
+	}
+}
+
 func TestFormatResultError(t *testing.T) {
 	r := &model.TestResult{
 		Timestamp:  time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
