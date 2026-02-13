@@ -1,0 +1,47 @@
+# Binaries for programs and plugins
+iperf-tool
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*_test
+
+# Output of the go installer
+*.out
+
+# Editor-specific files
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.bak
+*~
+.project
+.classpath
+.settings/
+
+# Local data
+*.csv
+.env
+.local/
+tags
+
+# Go module cache
+.cache/
+
+# Dependency directories
+vendor/
+
+# Log files
+*.log
+
+# UI related files
+ui/node_modules/
+ui/dist/
+ui/build/
+
+# Temporary files from current working directory
+.gemini/
+.claude/
