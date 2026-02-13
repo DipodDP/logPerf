@@ -20,6 +20,7 @@ type RemotePanel struct {
 
 	connectBtn    *widget.Button
 	disconnectBtn *widget.Button
+	installBtn    *widget.Button
 	startSrvBtn   *widget.Button
 	stopSrvBtn    *widget.Button
 	statusLabel   *widget.Label
@@ -56,6 +57,9 @@ func NewRemotePanel() *RemotePanel {
 	rp.disconnectBtn = widget.NewButton("Disconnect", rp.onDisconnect)
 	rp.disconnectBtn.Disable()
 
+	rp.installBtn = widget.NewButton("Install iperf3", rp.onInstall)
+	rp.installBtn.Disable()
+
 	rp.startSrvBtn = widget.NewButton("Start Server", rp.onStartServer)
 	rp.startSrvBtn.Disable()
 	rp.stopSrvBtn = widget.NewButton("Stop Server", rp.onStopServer)
@@ -73,6 +77,8 @@ func NewRemotePanel() *RemotePanel {
 		rp.passwordEntry,
 		container.NewHBox(rp.connectBtn, rp.disconnectBtn),
 		widget.NewSeparator(),
+		widget.NewLabel("iperf3 Setup"),
+		rp.installBtn,
 		widget.NewLabel("iperf3 Server Port"),
 		rp.portEntry,
 		container.NewHBox(rp.startSrvBtn, rp.stopSrvBtn),
@@ -106,6 +112,7 @@ func (rp *RemotePanel) onConnect() {
 	rp.statusLabel.SetText(fmt.Sprintf("Connected to %s", cfg.Host))
 	rp.connectBtn.Disable()
 	rp.disconnectBtn.Enable()
+	rp.installBtn.Enable()
 	rp.startSrvBtn.Enable()
 }
 
@@ -117,6 +124,7 @@ func (rp *RemotePanel) onDisconnect() {
 	rp.statusLabel.SetText("Disconnected")
 	rp.connectBtn.Enable()
 	rp.disconnectBtn.Disable()
+	rp.installBtn.Disable()
 	rp.startSrvBtn.Disable()
 	rp.stopSrvBtn.Disable()
 }
@@ -154,5 +162,25 @@ func (rp *RemotePanel) onStopServer() {
 	rp.statusLabel.SetText("Server stopped")
 	rp.startSrvBtn.Enable()
 	rp.stopSrvBtn.Disable()
+}
+
+func (rp *RemotePanel) onInstall() {
+	if rp.client == nil {
+		return
+	}
+
+	rp.installBtn.Disable()
+	rp.statusLabel.SetText("Installing iperf3...")
+
+	go func() {
+		defer rp.installBtn.Enable()
+
+		if err := rp.client.InstallIperf3(); err != nil {
+			rp.statusLabel.SetText(fmt.Sprintf("Install failed: %v", err))
+			return
+		}
+
+		rp.statusLabel.SetText("iperf3 installed successfully")
+	}()
 }
 
