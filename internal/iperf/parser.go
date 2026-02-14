@@ -46,11 +46,25 @@ type iperfEnd struct {
 type iperfSum struct {
 	BitsPerSecond float64 `json:"bits_per_second"`
 	Retransmits   int     `json:"retransmits"`
+	JitterMs      float64 `json:"jitter_ms"`
+	LostPackets   int     `json:"lost_packets"`
+	Packets       int     `json:"packets"`
+	LostPercent   float64 `json:"lost_percent"`
 }
 
 type iperfStreamEnd struct {
-	Sender   iperfStreamSide `json:"sender"`
-	Receiver iperfStreamSide `json:"receiver"`
+	Sender   iperfStreamSide  `json:"sender"`
+	Receiver iperfStreamSide  `json:"receiver"`
+	UDP      *iperfStreamUDP  `json:"udp"`
+}
+
+type iperfStreamUDP struct {
+	Socket        int     `json:"socket"`
+	BitsPerSecond float64 `json:"bits_per_second"`
+	JitterMs      float64 `json:"jitter_ms"`
+	LostPackets   int     `json:"lost_packets"`
+	Packets       int     `json:"packets"`
+	LostPercent   float64 `json:"lost_percent"`
 }
 
 type iperfStreamSide struct {
@@ -79,6 +93,7 @@ type intervalStream struct {
 	Bytes         int64   `json:"bytes"`
 	BitsPerSecond float64 `json:"bits_per_second"`
 	Retransmits   int     `json:"retransmits"`
+	Packets       int     `json:"packets"`
 	Omitted       bool    `json:"omitted"`
 }
 
@@ -131,14 +146,29 @@ func ParseEndData(data json.RawMessage) (*model.TestResult, error) {
 		SentBps:     end.SumSent.BitsPerSecond,
 		ReceivedBps: end.SumReceived.BitsPerSecond,
 		Retransmits: end.SumSent.Retransmits,
+		JitterMs:    end.SumSent.JitterMs,
+		LostPackets: end.SumSent.LostPackets,
+		LostPercent: end.SumSent.LostPercent,
+		Packets:     end.SumSent.Packets,
 	}
 	for i, s := range end.Streams {
-		result.Streams = append(result.Streams, model.StreamResult{
-			ID:          i + 1,
-			SentBps:     s.Sender.BitsPerSecond,
-			ReceivedBps: s.Receiver.BitsPerSecond,
-			Retransmits: s.Sender.Retransmits,
-		})
+		if s.UDP != nil {
+			result.Streams = append(result.Streams, model.StreamResult{
+				ID:          i + 1,
+				SentBps:     s.UDP.BitsPerSecond,
+				JitterMs:    s.UDP.JitterMs,
+				LostPackets: s.UDP.LostPackets,
+				LostPercent: s.UDP.LostPercent,
+				Packets:     s.UDP.Packets,
+			})
+		} else {
+			result.Streams = append(result.Streams, model.StreamResult{
+				ID:          i + 1,
+				SentBps:     s.Sender.BitsPerSecond,
+				ReceivedBps: s.Receiver.BitsPerSecond,
+				Retransmits: s.Sender.Retransmits,
+			})
+		}
 	}
 	return result, nil
 }
@@ -174,6 +204,10 @@ func ParseResult(jsonData []byte) (*model.TestResult, error) {
 		SentBps:     out.End.SumSent.BitsPerSecond,
 		ReceivedBps: out.End.SumReceived.BitsPerSecond,
 		Retransmits: out.End.SumSent.Retransmits,
+		JitterMs:    out.End.SumSent.JitterMs,
+		LostPackets: out.End.SumSent.LostPackets,
+		LostPercent: out.End.SumSent.LostPercent,
+		Packets:     out.End.SumSent.Packets,
 		Protocol:    out.Start.TestStart.Protocol,
 		Parallel:    out.Start.TestStart.NumStreams,
 		Duration:    out.Start.TestStart.Duration,
@@ -189,12 +223,23 @@ func ParseResult(jsonData []byte) (*model.TestResult, error) {
 	}
 
 	for i, s := range out.End.Streams {
-		result.Streams = append(result.Streams, model.StreamResult{
-			ID:          i + 1,
-			SentBps:     s.Sender.BitsPerSecond,
-			ReceivedBps: s.Receiver.BitsPerSecond,
-			Retransmits: s.Sender.Retransmits,
-		})
+		if s.UDP != nil {
+			result.Streams = append(result.Streams, model.StreamResult{
+				ID:          i + 1,
+				SentBps:     s.UDP.BitsPerSecond,
+				JitterMs:    s.UDP.JitterMs,
+				LostPackets: s.UDP.LostPackets,
+				LostPercent: s.UDP.LostPercent,
+				Packets:     s.UDP.Packets,
+			})
+		} else {
+			result.Streams = append(result.Streams, model.StreamResult{
+				ID:          i + 1,
+				SentBps:     s.Sender.BitsPerSecond,
+				ReceivedBps: s.Receiver.BitsPerSecond,
+				Retransmits: s.Sender.Retransmits,
+			})
+		}
 	}
 
 	if out.Error != "" {

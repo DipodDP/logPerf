@@ -12,6 +12,7 @@ type IntervalResult struct {
 	Bytes        int64
 	BandwidthBps float64
 	Retransmits  int
+	Packets      int
 	Omitted      bool
 }
 
@@ -31,6 +32,10 @@ type StreamResult struct {
 	SentBps     float64
 	ReceivedBps float64
 	Retransmits int
+	JitterMs    float64
+	LostPackets int
+	LostPercent float64
+	Packets     int
 }
 
 // SentMbps returns the sent throughput in Mbps.
@@ -55,6 +60,10 @@ type TestResult struct {
 	SentBps     float64
 	ReceivedBps float64
 	Retransmits int
+	JitterMs    float64
+	LostPackets int
+	LostPercent float64
+	Packets     int
 	Streams     []StreamResult
 	Intervals   []IntervalResult
 	Error       string
@@ -84,12 +93,24 @@ func (r *TestResult) VerifyStreamTotals() (sentOK, recvOK bool) {
 	if len(r.Streams) == 0 {
 		return true, true
 	}
+	tolerance := 0.001
+
+	// UDP streams have a single "udp" entry with no separate sent/received.
+	// Compare the stream's SentBps against the summary SentBps.
+	if r.Protocol == "UDP" {
+		var sentSum float64
+		for _, s := range r.Streams {
+			sentSum += s.SentBps
+		}
+		sentOK = r.SentBps == 0 || math.Abs(sentSum-r.SentBps)/r.SentBps <= tolerance
+		return sentOK, true
+	}
+
 	var sentSum, recvSum float64
 	for _, s := range r.Streams {
 		sentSum += s.SentBps
 		recvSum += s.ReceivedBps
 	}
-	tolerance := 0.001
 	sentOK = r.SentBps == 0 || math.Abs(sentSum-r.SentBps)/r.SentBps <= tolerance
 	recvOK = r.ReceivedBps == 0 || math.Abs(recvSum-r.ReceivedBps)/r.ReceivedBps <= tolerance
 	return sentOK, recvOK

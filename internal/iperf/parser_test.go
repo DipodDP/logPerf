@@ -253,6 +253,150 @@ func TestParseEndData(t *testing.T) {
 	}
 }
 
+const sampleUDPJSON = `{
+	"start": {
+		"connected": [{
+			"socket": 5,
+			"local_host": "127.0.0.1",
+			"local_port": 43210,
+			"remote_host": "127.0.0.1",
+			"remote_port": 5201
+		}],
+		"test_start": {
+			"protocol": "UDP",
+			"num_streams": 1,
+			"duration": 3,
+			"blksize": 8192,
+			"omit": 0
+		},
+		"timestamp": {
+			"time": "Mon, 01 Jan 2024 12:00:00 GMT",
+			"timesecs": 1704110400
+		}
+	},
+	"intervals": [],
+	"end": {
+		"sum_sent": {
+			"start": 0,
+			"end": 3.0,
+			"seconds": 3.0,
+			"bytes": 393216,
+			"bits_per_second": 1048576.0,
+			"jitter_ms": 0.025,
+			"lost_packets": 3,
+			"packets": 48,
+			"lost_percent": 6.25,
+			"sender": true
+		},
+		"sum_received": {
+			"start": 0,
+			"end": 3.0,
+			"seconds": 3.0,
+			"bytes": 368640,
+			"bits_per_second": 983040.0,
+			"sender": false
+		},
+		"streams": [
+			{
+				"udp": {
+					"socket": 5,
+					"bits_per_second": 1048576.0,
+					"jitter_ms": 0.025,
+					"lost_packets": 3,
+					"packets": 48,
+					"lost_percent": 6.25
+				}
+			}
+		]
+	}
+}`
+
+func TestParseResultUDP(t *testing.T) {
+	result, err := ParseResult([]byte(sampleUDPJSON))
+	if err != nil {
+		t.Fatalf("ParseResult() error: %v", err)
+	}
+
+	if result.Protocol != "UDP" {
+		t.Errorf("Protocol = %q, want %q", result.Protocol, "UDP")
+	}
+	if math.Abs(result.SentBps-1048576.0) > 1 {
+		t.Errorf("SentBps = %f, want 1048576", result.SentBps)
+	}
+	if math.Abs(result.JitterMs-0.025) > 0.001 {
+		t.Errorf("JitterMs = %f, want 0.025", result.JitterMs)
+	}
+	if result.LostPackets != 3 {
+		t.Errorf("LostPackets = %d, want 3", result.LostPackets)
+	}
+	if result.Packets != 48 {
+		t.Errorf("Packets = %d, want 48", result.Packets)
+	}
+	if math.Abs(result.LostPercent-6.25) > 0.01 {
+		t.Errorf("LostPercent = %f, want 6.25", result.LostPercent)
+	}
+
+	// Check per-stream UDP data
+	if len(result.Streams) != 1 {
+		t.Fatalf("Streams count = %d, want 1", len(result.Streams))
+	}
+	s := result.Streams[0]
+	if math.Abs(s.SentBps-1048576.0) > 1 {
+		t.Errorf("Stream SentBps = %f, want 1048576", s.SentBps)
+	}
+	if math.Abs(s.JitterMs-0.025) > 0.001 {
+		t.Errorf("Stream JitterMs = %f, want 0.025", s.JitterMs)
+	}
+	if s.LostPackets != 3 {
+		t.Errorf("Stream LostPackets = %d, want 3", s.LostPackets)
+	}
+	if s.Packets != 48 {
+		t.Errorf("Stream Packets = %d, want 48", s.Packets)
+	}
+
+	// VerifyStreamTotals should pass for UDP
+	result.Protocol = "UDP"
+	sentOK, recvOK := result.VerifyStreamTotals()
+	if !sentOK {
+		t.Error("VerifyStreamTotals sentOK should be true for UDP")
+	}
+	if !recvOK {
+		t.Error("VerifyStreamTotals recvOK should be true for UDP")
+	}
+}
+
+const sampleUDPEndEvent = `{"event":"end","data":{"sum_sent":{"start":0,"end":3,"seconds":3,"bytes":393216,"bits_per_second":1048576,"jitter_ms":0.025,"lost_packets":3,"packets":48,"lost_percent":6.25,"sender":true},"sum_received":{"start":0,"end":3,"seconds":3,"bytes":368640,"bits_per_second":983040,"sender":false},"streams":[{"udp":{"socket":5,"bits_per_second":1048576,"jitter_ms":0.025,"lost_packets":3,"packets":48,"lost_percent":6.25}}]}}`
+
+func TestParseEndDataUDP(t *testing.T) {
+	ev, _ := ParseStreamEvent([]byte(sampleUDPEndEvent))
+	result, err := ParseEndData(ev.Data)
+	if err != nil {
+		t.Fatalf("ParseEndData() error: %v", err)
+	}
+	if math.Abs(result.SentBps-1048576) > 1 {
+		t.Errorf("SentBps = %f, want 1048576", result.SentBps)
+	}
+	if math.Abs(result.JitterMs-0.025) > 0.001 {
+		t.Errorf("JitterMs = %f, want 0.025", result.JitterMs)
+	}
+	if result.LostPackets != 3 {
+		t.Errorf("LostPackets = %d, want 3", result.LostPackets)
+	}
+	if result.Packets != 48 {
+		t.Errorf("Packets = %d, want 48", result.Packets)
+	}
+	if len(result.Streams) != 1 {
+		t.Fatalf("Streams count = %d, want 1", len(result.Streams))
+	}
+	s := result.Streams[0]
+	if s.ReceivedBps != 0 {
+		t.Errorf("Stream ReceivedBps = %f, want 0 (UDP has no receiver)", s.ReceivedBps)
+	}
+	if math.Abs(s.JitterMs-0.025) > 0.001 {
+		t.Errorf("Stream JitterMs = %f, want 0.025", s.JitterMs)
+	}
+}
+
 func TestParseIntervalDataOmitted(t *testing.T) {
 	data := `{"streams":[],"sum":{"start":0,"end":1,"seconds":1,"bytes":0,"bits_per_second":0,"retransmits":0,"omitted":true}}`
 	interval, err := ParseIntervalData([]byte(data))

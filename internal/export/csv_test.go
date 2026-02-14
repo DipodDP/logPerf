@@ -120,6 +120,59 @@ func TestWriteIntervalLog(t *testing.T) {
 	}
 }
 
+func TestWriteCSV_UDP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "results.csv")
+
+	results := []model.TestResult{{
+		Timestamp:   time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+		ServerAddr:  "127.0.0.1",
+		Port:        5201,
+		Parallel:    1,
+		Duration:    3,
+		Protocol:    "UDP",
+		SentBps:     1_048_576,
+		JitterMs:    0.025,
+		LostPackets: 3,
+		LostPercent: 6.25,
+		Packets:     48,
+	}}
+
+	if err := WriteCSV(path, results); err != nil {
+		t.Fatalf("WriteCSV() error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+
+	content := string(data)
+
+	// Check new headers present
+	if !strings.Contains(content, "Jitter_ms") {
+		t.Error("CSV should contain Jitter_ms header")
+	}
+	if !strings.Contains(content, "Lost_Packets") {
+		t.Error("CSV should contain Lost_Packets header")
+	}
+	if !strings.Contains(content, "Lost_Percent") {
+		t.Error("CSV should contain Lost_Percent header")
+	}
+
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(lines))
+	}
+	// Check data row contains UDP values
+	if !strings.Contains(lines[1], "0.025") {
+		t.Errorf("row should contain jitter: %s", lines[1])
+	}
+	if !strings.Contains(lines[1], "6.25") {
+		t.Errorf("row should contain lost percent: %s", lines[1])
+	}
+}
+
 func TestWriteCSV_WithError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "results.csv")

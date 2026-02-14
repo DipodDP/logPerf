@@ -39,18 +39,39 @@ func FormatResult(r *model.TestResult) string {
 		return b.String()
 	}
 
+	isUDP := r.Protocol == "UDP"
+
+	hasReceiver := r.ReceivedBps > 0
+
 	if len(r.Streams) > 1 {
 		b.WriteString("\n--- Per-Stream Results ---\n")
 		for _, s := range r.Streams {
-			b.WriteString(fmt.Sprintf("Stream %d:  Sent: %.2f Mbps  Received: %.2f Mbps\n",
-				s.ID, s.SentMbps(), s.ReceivedMbps()))
+			if isUDP {
+				b.WriteString(fmt.Sprintf("Stream %d:  %.2f Mbps  Jitter: %.3f ms  Lost: %d/%d (%.2f%%)\n",
+					s.ID, s.SentMbps(), s.JitterMs, s.LostPackets, s.Packets, s.LostPercent))
+			} else if hasReceiver {
+				b.WriteString(fmt.Sprintf("Stream %d:  Sent: %.2f Mbps  Received: %.2f Mbps\n",
+					s.ID, s.SentMbps(), s.ReceivedMbps()))
+			} else {
+				b.WriteString(fmt.Sprintf("Stream %d:  %.2f Mbps\n",
+					s.ID, s.SentMbps()))
+			}
 		}
 	}
 
 	b.WriteString("\n--- Summary ---\n")
-	b.WriteString(fmt.Sprintf("Sent:            %.2f Mbps\n", r.SentMbps()))
-	b.WriteString(fmt.Sprintf("Received:        %.2f Mbps\n", r.ReceivedMbps()))
-	b.WriteString(fmt.Sprintf("Retransmits:     %d\n", r.Retransmits))
+	if isUDP {
+		b.WriteString(fmt.Sprintf("Sent:            %.2f Mbps\n", r.SentMbps()))
+		b.WriteString(fmt.Sprintf("Jitter:          %.3f ms\n", r.JitterMs))
+		b.WriteString(fmt.Sprintf("Packet Loss:     %d/%d (%.2f%%)\n", r.LostPackets, r.Packets, r.LostPercent))
+	} else if hasReceiver {
+		b.WriteString(fmt.Sprintf("Sent:            %.2f Mbps\n", r.SentMbps()))
+		b.WriteString(fmt.Sprintf("Received:        %.2f Mbps\n", r.ReceivedMbps()))
+		b.WriteString(fmt.Sprintf("Retransmits:     %d\n", r.Retransmits))
+	} else {
+		b.WriteString(fmt.Sprintf("Bandwidth:       %.2f Mbps\n", r.SentMbps()))
+		b.WriteString(fmt.Sprintf("Retransmits:     %d\n", r.Retransmits))
+	}
 
 	sentOK, recvOK := r.VerifyStreamTotals()
 	if !sentOK || !recvOK {

@@ -19,6 +19,9 @@ var csvHeaders = []string{
 	"Sent_Mbps",
 	"Received_Mbps",
 	"Retransmits",
+	"Jitter_ms",
+	"Lost_Packets",
+	"Lost_Percent",
 	"Error",
 }
 
@@ -53,6 +56,9 @@ func WriteCSV(path string, results []model.TestResult) error {
 			fmt.Sprintf("%.2f", r.SentMbps()),
 			fmt.Sprintf("%.2f", r.ReceivedMbps()),
 			strconv.Itoa(r.Retransmits),
+			fmt.Sprintf("%.3f", r.JitterMs),
+			strconv.Itoa(r.LostPackets),
+			fmt.Sprintf("%.2f", r.LostPercent),
 			r.Error,
 		}
 		if err := w.Write(row); err != nil {
