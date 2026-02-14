@@ -22,6 +22,9 @@ var csvHeaders = []string{
 	"Jitter_ms",
 	"Lost_Packets",
 	"Lost_Percent",
+	"Ping_Baseline_Avg_ms",
+	"Ping_Loaded_Avg_ms",
+	"Ping_Loaded_Max_ms",
 	"Error",
 }
 
@@ -46,6 +49,15 @@ func WriteCSV(path string, results []model.TestResult) error {
 	}
 
 	for _, r := range results {
+		var baselineAvg, loadedAvg, loadedMax string
+		if r.PingBaseline != nil {
+			baselineAvg = fmt.Sprintf("%.2f", r.PingBaseline.AvgMs)
+		}
+		if r.PingLoaded != nil {
+			loadedAvg = fmt.Sprintf("%.2f", r.PingLoaded.AvgMs)
+			loadedMax = fmt.Sprintf("%.2f", r.PingLoaded.MaxMs)
+		}
+
 		row := []string{
 			r.Timestamp.Format("2006-01-02 15:04:05"),
 			r.ServerAddr,
@@ -59,6 +71,9 @@ func WriteCSV(path string, results []model.TestResult) error {
 			fmt.Sprintf("%.3f", r.JitterMs),
 			strconv.Itoa(r.LostPackets),
 			fmt.Sprintf("%.2f", r.LostPercent),
+			baselineAvg,
+			loadedAvg,
+			loadedMax,
 			r.Error,
 		}
 		if err := w.Write(row); err != nil {

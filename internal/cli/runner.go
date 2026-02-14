@@ -9,6 +9,7 @@ import (
 	"iperf-tool/internal/format"
 	"iperf-tool/internal/iperf"
 	"iperf-tool/internal/model"
+	"iperf-tool/internal/ping"
 	"iperf-tool/internal/ssh"
 )
 
@@ -22,6 +23,8 @@ type RunnerConfig struct {
 	Interval   int
 	Protocol   string
 	BinaryPath string
+	BlockSize   int
+	MeasurePing bool
 
 	// Remote server (optional)
 	SSHHost     string
@@ -50,6 +53,7 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 		Duration:   cfg.Duration,
 		Interval:   cfg.Interval,
 		Protocol:   cfg.Protocol,
+		BlockSize:  cfg.BlockSize,
 	}
 
 	if err := iperfCfg.Validate(); err != nil {
@@ -57,66 +61,115 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 	}
 
 	runner := iperf.NewRunner()
+	ctx := context.Background()
 
 	fmt.Printf("Starting test: %s:%d (%s, %d parallel, %ds duration)\n",
 		cfg.ServerAddr, cfg.Port, strings.ToUpper(cfg.Protocol), cfg.Parallel, cfg.Duration)
 
-	// Try json-stream mode first (iperf3 >= 3.17)
+	// Phase 1: baseline ping (before iperf)
+	var baseline *ping.Result
+	if cfg.MeasurePing {
+		fmt.Println("Running baseline ping (4 packets)...")
+		var err error
+		baseline, err = ping.Run(ctx, cfg.ServerAddr, 4)
+		if err != nil {
+			fmt.Printf("Baseline ping failed: %v\n", err)
+		} else {
+			fmt.Printf("Baseline latency: min/avg/max = %.2f / %.2f / %.2f ms\n",
+				baseline.MinMs, baseline.AvgMs, baseline.MaxMs)
+		}
+	}
+
+	// Phase 2: start background ping (during iperf)
+	var loadedCh chan *ping.Result
+	var pingCancel context.CancelFunc
+	if cfg.MeasurePing {
+		var pingCtx context.Context
+		pingCtx, pingCancel = context.WithCancel(ctx)
+		loadedCh = make(chan *ping.Result, 1)
+		go func() {
+			loaded, err := ping.RunUntilCancel(pingCtx, cfg.ServerAddr)
+			if err != nil {
+				fmt.Printf("Under-load ping failed: %v\n", err)
+				loadedCh <- nil
+			} else {
+				loadedCh <- loaded
+			}
+		}()
+	}
+
+	// Run iperf test
+	result, err := runIperfTest(runner, iperfCfg, cfg)
+
+	// Stop background ping and collect result
+	if cfg.MeasurePing && pingCancel != nil {
+		pingCancel()
+		loaded := <-loadedCh
+		if result != nil {
+			if baseline != nil {
+				result.PingBaseline = pingResultToModel(baseline)
+			}
+			if loaded != nil {
+				result.PingLoaded = pingResultToModel(loaded)
+			}
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	saveResults(result, cfg)
+	return result, nil
+}
+
+func pingResultToModel(p *ping.Result) *model.PingResult {
+	return &model.PingResult{
+		PacketsSent: p.PacketsSent,
+		PacketsRecv: p.PacketsRecv,
+		PacketLoss:  p.PacketLoss,
+		MinMs:       p.MinMs,
+		AvgMs:       p.AvgMs,
+		MaxMs:       p.MaxMs,
+	}
+}
+
+func runIperfTest(runner *iperf.Runner, iperfCfg iperf.IperfConfig, cfg RunnerConfig) (*model.TestResult, error) {
 	_, versionErr := iperf.CheckVersion(iperfCfg.BinaryPath)
 	if versionErr != nil {
 		fmt.Printf("Note: %v — falling back to standard JSON mode (no live intervals)\n", versionErr)
-		return localTestRunnerFallback(runner, iperfCfg, cfg)
+		return runner.RunWithPipe(context.Background(), iperfCfg, func(line string) {
+			if cfg.Verbose {
+				fmt.Println(line)
+			}
+		})
 	}
 
 	fmt.Println(format.FormatIntervalHeader())
 	fmt.Println(strings.Repeat("-", 60))
 
-	result, err := runner.RunWithIntervals(context.Background(), iperfCfg, func(interval *model.IntervalResult) {
+	return runner.RunWithIntervals(context.Background(), iperfCfg, func(interval *model.IntervalResult) {
 		fmt.Println(format.FormatInterval(interval))
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	if cfg.OutputCSV != "" {
-		if err := export.WriteCSV(cfg.OutputCSV, []model.TestResult{*result}); err != nil {
-			return result, fmt.Errorf("save CSV: %w", err)
-		}
-		// Write interval log alongside the main CSV
-		logPath := strings.TrimSuffix(cfg.OutputCSV, ".csv") + "_log.csv"
-		if err := export.WriteIntervalLog(logPath, result.Intervals); err != nil {
-			return result, fmt.Errorf("save interval log: %w", err)
-		}
-		if cfg.Verbose {
-			fmt.Printf("Results saved to: %s\n", cfg.OutputCSV)
-			fmt.Printf("Interval log saved to: %s\n", logPath)
-		}
-	}
-
-	return result, nil
 }
 
-// localTestRunnerFallback uses the legacy -J mode when --json-stream is unavailable.
-func localTestRunnerFallback(runner *iperf.Runner, iperfCfg iperf.IperfConfig, cfg RunnerConfig) (*model.TestResult, error) {
-	result, err := runner.RunWithPipe(context.Background(), iperfCfg, func(line string) {
-		if cfg.Verbose {
-			fmt.Println(line)
-		}
-	})
-	if err != nil {
-		return nil, err
+func saveResults(result *model.TestResult, cfg RunnerConfig) {
+	if cfg.OutputCSV == "" {
+		return
 	}
-
-	if cfg.OutputCSV != "" {
-		if err := export.WriteCSV(cfg.OutputCSV, []model.TestResult{*result}); err != nil {
-			return result, fmt.Errorf("save CSV: %w", err)
-		}
-		if cfg.Verbose {
-			fmt.Printf("Results saved to: %s\n", cfg.OutputCSV)
+	if err := export.WriteCSV(cfg.OutputCSV, []model.TestResult{*result}); err != nil {
+		fmt.Printf("Save CSV error: %v\n", err)
+		return
+	}
+	logPath := strings.TrimSuffix(cfg.OutputCSV, ".csv") + "_log.csv"
+	if len(result.Intervals) > 0 {
+		if err := export.WriteIntervalLog(logPath, result.Intervals); err != nil {
+			fmt.Printf("Save interval log error: %v\n", err)
 		}
 	}
-
-	return result, nil
+	if cfg.Verbose {
+		fmt.Printf("Results saved to: %s\n", cfg.OutputCSV)
+	}
 }
 
 // RemoteServerRunner manages a remote iperf3 server via SSH.

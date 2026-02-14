@@ -16,6 +16,8 @@ type IperfConfig struct {
 	Duration   int    // test duration in seconds
 	Interval   int    // reporting interval in seconds
 	Protocol   string // "tcp" or "udp"
+	BlockSize   int  // buffer/datagram size in bytes (0 = iperf3 default)
+	MeasurePing bool // run ping before and during test
 }
 
 // DefaultConfig returns an IperfConfig with sensible defaults.
@@ -56,6 +58,9 @@ func (c *IperfConfig) Validate() error {
 	if c.Protocol != "tcp" && c.Protocol != "udp" {
 		return fmt.Errorf("protocol must be tcp or udp, got %q", c.Protocol)
 	}
+	if c.BlockSize < 0 || c.BlockSize > 134217728 {
+		return fmt.Errorf("block size must be between 1 and 134217728, got %d", c.BlockSize)
+	}
 	if c.BinaryPath == "" {
 		return fmt.Errorf("iperf3 binary path is required")
 	}
@@ -74,6 +79,9 @@ func (c *IperfConfig) ToArgs() []string {
 	}
 	if c.Protocol == "udp" {
 		args = append(args, "-u")
+	}
+	if c.BlockSize > 0 {
+		args = append(args, "-l", strconv.Itoa(c.BlockSize))
 	}
 	return args
 }

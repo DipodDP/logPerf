@@ -78,6 +78,18 @@ func FormatResult(r *model.TestResult) string {
 		b.WriteString("WARNING: Per-stream totals do not match summary values\n")
 	}
 
+	if r.PingBaseline != nil || r.PingLoaded != nil {
+		b.WriteString("\n--- Latency ---\n")
+		if r.PingBaseline != nil {
+			b.WriteString(fmt.Sprintf("Baseline:    min/avg/max = %.2f / %.2f / %.2f ms\n",
+				r.PingBaseline.MinMs, r.PingBaseline.AvgMs, r.PingBaseline.MaxMs))
+		}
+		if r.PingLoaded != nil {
+			b.WriteString(fmt.Sprintf("Under load:  min/avg/max = %.2f / %.2f / %.2f ms\n",
+				r.PingLoaded.MinMs, r.PingLoaded.AvgMs, r.PingLoaded.MaxMs))
+		}
+	}
+
 	b.WriteString("====================")
 	return b.String()
 }

@@ -5,6 +5,16 @@ import (
 	"time"
 )
 
+// PingResult holds parsed ping latency statistics.
+type PingResult struct {
+	PacketsSent int
+	PacketsRecv int
+	PacketLoss  float64
+	MinMs       float64
+	AvgMs       float64
+	MaxMs       float64
+}
+
 // IntervalResult holds a single interval measurement from an iperf3 test.
 type IntervalResult struct {
 	TimeStart    float64 // seconds from test start
@@ -65,8 +75,10 @@ type TestResult struct {
 	LostPercent float64
 	Packets     int
 	Streams     []StreamResult
-	Intervals   []IntervalResult
-	Error       string
+	Intervals    []IntervalResult
+	PingBaseline *PingResult
+	PingLoaded   *PingResult
+	Error        string
 }
 
 // SentMbps returns the sent throughput in Mbps.

@@ -18,8 +18,10 @@ type ConfigForm struct {
 	intervalEntry *widget.Entry
 	durationEntry *widget.Entry
 	protocolRadio *widget.RadioGroup
-	binaryEntry   *widget.Entry
-	form          *fyne.Container
+	blockSizeEntry   *widget.Entry
+	measurePingCheck *widget.Check
+	binaryEntry      *widget.Entry
+	form             *fyne.Container
 }
 
 // NewConfigForm creates a new configuration form with default values.
@@ -49,6 +51,11 @@ func NewConfigForm() *ConfigForm {
 	cf.protocolRadio.SetSelected("TCP")
 	cf.protocolRadio.Horizontal = true
 
+	cf.blockSizeEntry = widget.NewEntry()
+	cf.blockSizeEntry.SetPlaceHolder("default")
+
+	cf.measurePingCheck = widget.NewCheck("Measure Ping (latency before & during test)", nil)
+
 	cf.binaryEntry = widget.NewEntry()
 	cf.binaryEntry.SetText("iperf3")
 	cf.binaryEntry.SetPlaceHolder("path to iperf3 binary")
@@ -66,6 +73,9 @@ func NewConfigForm() *ConfigForm {
 		cf.durationEntry,
 		widget.NewLabel("Protocol"),
 		cf.protocolRadio,
+		widget.NewLabel("Block Size (bytes)"),
+		cf.blockSizeEntry,
+		cf.measurePingCheck,
 		widget.NewLabel("iperf3 Binary"),
 		cf.binaryEntry,
 	)
@@ -98,6 +108,10 @@ func (cf *ConfigForm) LoadPreferences(prefs fyne.Preferences) {
 	if v := prefs.String("config.protocol"); v != "" {
 		cf.protocolRadio.SetSelected(v)
 	}
+	if v := prefs.String("config.block_size"); v != "" {
+		cf.blockSizeEntry.SetText(v)
+	}
+	cf.measurePingCheck.SetChecked(prefs.Bool("config.measure_ping"))
 	if v := prefs.String("config.binary"); v != "" {
 		cf.binaryEntry.SetText(v)
 	}
@@ -111,6 +125,8 @@ func (cf *ConfigForm) SavePreferences(prefs fyne.Preferences) {
 	prefs.SetString("config.interval", cf.intervalEntry.Text)
 	prefs.SetString("config.duration", cf.durationEntry.Text)
 	prefs.SetString("config.protocol", cf.protocolRadio.Selected)
+	prefs.SetString("config.block_size", cf.blockSizeEntry.Text)
+	prefs.SetBool("config.measure_ping", cf.measurePingCheck.Checked)
 	prefs.SetString("config.binary", cf.binaryEntry.Text)
 }
 
@@ -121,18 +137,22 @@ func (cf *ConfigForm) Config() iperf.IperfConfig {
 	interval, _ := strconv.Atoi(cf.intervalEntry.Text)
 	duration, _ := strconv.Atoi(cf.durationEntry.Text)
 
+	blockSize, _ := strconv.Atoi(cf.blockSizeEntry.Text)
+
 	protocol := "tcp"
 	if cf.protocolRadio.Selected == "UDP" {
 		protocol = "udp"
 	}
 
 	return iperf.IperfConfig{
-		BinaryPath: cf.binaryEntry.Text,
-		ServerAddr: cf.serverEntry.Text,
-		Port:       port,
-		Parallel:   parallel,
-		Duration:   duration,
-		Interval:   interval,
-		Protocol:   protocol,
+		BinaryPath:  cf.binaryEntry.Text,
+		ServerAddr:  cf.serverEntry.Text,
+		Port:        port,
+		Parallel:    parallel,
+		Duration:    duration,
+		Interval:    interval,
+		Protocol:    protocol,
+		BlockSize:   blockSize,
+		MeasurePing: cf.measurePingCheck.Checked,
 	}
 }

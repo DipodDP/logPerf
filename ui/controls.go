@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"iperf-tool/internal/format"
 	"iperf-tool/internal/iperf"
 	"iperf-tool/internal/model"
+	"iperf-tool/internal/ping"
 )
 
 type testState int
@@ -89,6 +91,39 @@ func (c *Controls) onStart() {
 
 		c.outputView.AppendLine(fmt.Sprintf("Starting iperf3 test to %s:%d ...", cfg.ServerAddr, cfg.Port))
 
+		ctx := context.Background()
+
+		// Phase 1: baseline ping
+		var baseline *ping.Result
+		if cfg.MeasurePing {
+			c.outputView.AppendLine("Running baseline ping (4 packets)...")
+			var err error
+			baseline, err = ping.Run(ctx, cfg.ServerAddr, 4)
+			if err != nil {
+				c.outputView.AppendLine(fmt.Sprintf("Baseline ping failed: %v", err))
+			} else {
+				c.outputView.AppendLine(fmt.Sprintf("Baseline latency: min/avg/max = %.2f / %.2f / %.2f ms",
+					baseline.MinMs, baseline.AvgMs, baseline.MaxMs))
+			}
+		}
+
+		// Phase 2: start background ping during iperf
+		var loadedCh chan *ping.Result
+		var pingCancel context.CancelFunc
+		if cfg.MeasurePing {
+			var pingCtx context.Context
+			pingCtx, pingCancel = context.WithCancel(ctx)
+			loadedCh = make(chan *ping.Result, 1)
+			go func() {
+				loaded, err := ping.RunUntilCancel(pingCtx, cfg.ServerAddr)
+				if err != nil {
+					loadedCh <- nil
+				} else {
+					loadedCh <- loaded
+				}
+			}()
+		}
+
 		_, versionErr := iperf.CheckVersion(cfg.BinaryPath)
 		useStream := versionErr == nil
 
@@ -103,6 +138,34 @@ func (c *Controls) onStart() {
 				c.outputView.AppendLine("Server restarted, retrying test...")
 				time.Sleep(time.Second)
 				result, err = c.runTest(cfg, useStream)
+			}
+		}
+
+		// Stop background ping and collect result
+		if cfg.MeasurePing && pingCancel != nil {
+			pingCancel()
+			loaded := <-loadedCh
+			if result != nil {
+				if baseline != nil {
+					result.PingBaseline = &model.PingResult{
+						PacketsSent: baseline.PacketsSent,
+						PacketsRecv: baseline.PacketsRecv,
+						PacketLoss:  baseline.PacketLoss,
+						MinMs:       baseline.MinMs,
+						AvgMs:       baseline.AvgMs,
+						MaxMs:       baseline.MaxMs,
+					}
+				}
+				if loaded != nil {
+					result.PingLoaded = &model.PingResult{
+						PacketsSent: loaded.PacketsSent,
+						PacketsRecv: loaded.PacketsRecv,
+						PacketLoss:  loaded.PacketLoss,
+						MinMs:       loaded.MinMs,
+						AvgMs:       loaded.AvgMs,
+						MaxMs:       loaded.MaxMs,
+					}
+				}
 			}
 		}
 

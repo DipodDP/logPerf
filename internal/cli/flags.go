@@ -42,6 +42,9 @@ func ParseFlags() (*RunnerConfig, error) {
 	fs.IntVar(&cfg.Interval, "i", cfg.Interval, "Reporting interval in seconds")
 	fs.IntVar(&cfg.Interval, "interval", cfg.Interval, "Reporting interval in seconds")
 	fs.StringVar(&cfg.Protocol, "u", cfg.Protocol, "UDP mode (use 'udp', default 'tcp')")
+	fs.IntVar(&cfg.BlockSize, "l", 0, "Block size (buffer/datagram size in bytes)")
+	fs.IntVar(&cfg.BlockSize, "block-size", 0, "Block size (buffer/datagram size in bytes)")
+	fs.BoolVar(&cfg.MeasurePing, "ping", false, "Measure latency before and during test")
 	fs.StringVar(&cfg.BinaryPath, "binary", cfg.BinaryPath, "Path to iperf3 binary")
 
 	// Remote server flags
@@ -95,6 +98,8 @@ LOCAL TEST MODE:
   -t, -time <sec>          Test duration in seconds (default: 10)
   -i, -interval <sec>      Reporting interval (default: 1)
   -u <udp|tcp>             Protocol mode (default: tcp)
+  -l, -block-size <bytes>  Block size / buffer length (default: iperf3 default)
+  --ping                   Measure latency before and during test
   -binary <path>           Path to iperf3 binary (default: iperf3)
 
 REMOTE SERVER MODE:

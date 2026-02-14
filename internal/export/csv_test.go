@@ -173,6 +173,61 @@ func TestWriteCSV_UDP(t *testing.T) {
 	}
 }
 
+func TestWriteCSV_WithPing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "results.csv")
+
+	results := []model.TestResult{{
+		Timestamp:   time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+		ServerAddr:  "192.168.1.1",
+		Port:        5201,
+		Parallel:    1,
+		Duration:    10,
+		Protocol:    "TCP",
+		SentBps:     940_000_000,
+		ReceivedBps: 936_000_000,
+		Retransmits: 5,
+		PingBaseline: &model.PingResult{MinMs: 1.0, AvgMs: 2.0, MaxMs: 3.0},
+		PingLoaded:   &model.PingResult{MinMs: 5.0, AvgMs: 10.0, MaxMs: 50.0},
+	}}
+
+	if err := WriteCSV(path, results); err != nil {
+		t.Fatalf("WriteCSV() error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+
+	content := string(data)
+
+	if !strings.Contains(content, "Ping_Baseline_Avg_ms") {
+		t.Error("CSV should contain Ping_Baseline_Avg_ms header")
+	}
+	if !strings.Contains(content, "Ping_Loaded_Avg_ms") {
+		t.Error("CSV should contain Ping_Loaded_Avg_ms header")
+	}
+	if !strings.Contains(content, "Ping_Loaded_Max_ms") {
+		t.Error("CSV should contain Ping_Loaded_Max_ms header")
+	}
+
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(lines))
+	}
+	// Check baseline avg (2.00) and loaded avg (10.00) are present
+	if !strings.Contains(lines[1], "2.00") {
+		t.Errorf("row should contain baseline avg: %s", lines[1])
+	}
+	if !strings.Contains(lines[1], "10.00") {
+		t.Errorf("row should contain loaded avg: %s", lines[1])
+	}
+	if !strings.Contains(lines[1], "50.00") {
+		t.Errorf("row should contain loaded max: %s", lines[1])
+	}
+}
+
 func TestWriteCSV_WithError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "results.csv")

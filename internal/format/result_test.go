@@ -264,6 +264,43 @@ func TestFormatResultSenderOnly(t *testing.T) {
 	}
 }
 
+func TestFormatResultWithPing(t *testing.T) {
+	r := &model.TestResult{
+		Timestamp:   time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
+		ServerAddr:  "192.168.1.1",
+		Port:        5201,
+		Protocol:    "TCP",
+		Parallel:    1,
+		Duration:    10,
+		SentBps:     940_000_000,
+		ReceivedBps: 936_000_000,
+		Retransmits: 5,
+		Streams: []model.StreamResult{
+			{ID: 1, SentBps: 940_000_000, ReceivedBps: 936_000_000, Retransmits: 5},
+		},
+		PingBaseline: &model.PingResult{MinMs: 1.23, AvgMs: 2.34, MaxMs: 3.45},
+		PingLoaded:   &model.PingResult{MinMs: 5.67, AvgMs: 12.34, MaxMs: 45.67},
+	}
+
+	out := FormatResult(r)
+
+	if !strings.Contains(out, "--- Latency ---") {
+		t.Error("missing Latency section")
+	}
+	if !strings.Contains(out, "Baseline:") {
+		t.Error("missing Baseline line")
+	}
+	if !strings.Contains(out, "2.34") {
+		t.Error("missing baseline avg")
+	}
+	if !strings.Contains(out, "Under load:") {
+		t.Error("missing Under load line")
+	}
+	if !strings.Contains(out, "12.34") {
+		t.Error("missing loaded avg")
+	}
+}
+
 func TestFormatResultError(t *testing.T) {
 	r := &model.TestResult{
 		Timestamp:  time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
