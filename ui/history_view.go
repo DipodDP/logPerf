@@ -5,12 +5,13 @@ import (
 	"sync"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
 	"iperf-tool/internal/model"
 )
 
-var historyColumns = []string{"Time", "Server", "Sent Mbps", "Received Mbps", "Duration", "Status"}
+var historyColumns = []string{"Time", "Server", "Sent (Mbps)", "Recv (Mbps)", "Duration (s)", "Status"}
 
 // HistoryView displays a table of past test results.
 type HistoryView struct {
@@ -29,19 +30,19 @@ func NewHistoryView() *HistoryView {
 		hv.updateCell,
 	)
 
-	hv.table.SetColumnWidth(0, 160) // Time
-	hv.table.SetColumnWidth(1, 140) // Server
-	hv.table.SetColumnWidth(2, 100) // Sent
-	hv.table.SetColumnWidth(3, 120) // Received
-	hv.table.SetColumnWidth(4, 80)  // Duration
-	hv.table.SetColumnWidth(5, 120) // Status
+	hv.table.SetColumnWidth(0, 160)
+	hv.table.SetColumnWidth(1, 140)
+	hv.table.SetColumnWidth(2, 100)
+	hv.table.SetColumnWidth(3, 120)
+	hv.table.SetColumnWidth(4, 80)
+	hv.table.SetColumnWidth(5, 120)
 
 	return hv
 }
 
-// Container returns the table widget.
-func (hv *HistoryView) Container() *widget.Table {
-	return hv.table
+// Container returns the table widget wrapped in a container.
+func (hv *HistoryView) Container() *fyne.Container {
+	return container.NewMax(hv.table)
 }
 
 // AddResult appends a test result to the history, safe to call from any goroutine.
@@ -104,7 +105,7 @@ func (hv *HistoryView) updateCell(id widget.TableCellID, obj fyne.CanvasObject) 
 	case 3:
 		label.SetText(fmt.Sprintf("%.2f", r.ReceivedMbps()))
 	case 4:
-		label.SetText(fmt.Sprintf("%ds", r.Duration))
+		label.SetText(fmt.Sprintf("%d", r.Duration))
 	case 5:
 		label.SetText(r.Status())
 	}

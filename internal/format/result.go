@@ -27,6 +27,16 @@ func FormatResult(r *model.TestResult) string {
 	b.WriteString(fmt.Sprintf("Server:          %s:%d\n", r.ServerAddr, r.Port))
 	b.WriteString(fmt.Sprintf("Protocol:        %s\n", r.Protocol))
 
+	if r.Direction != "" {
+		b.WriteString(fmt.Sprintf("Direction:       %s\n", r.Direction))
+	}
+	if r.Congestion != "" {
+		b.WriteString(fmt.Sprintf("Congestion:      %s\n", r.Congestion))
+	}
+	if r.Bandwidth != "" {
+		b.WriteString(fmt.Sprintf("Bandwidth Target: %s\n", r.Bandwidth))
+	}
+
 	if r.Parallel > 1 {
 		b.WriteString(fmt.Sprintf("Parallel:        %d streams\n", r.Parallel))
 	}
@@ -40,6 +50,7 @@ func FormatResult(r *model.TestResult) string {
 	}
 
 	isUDP := r.Protocol == "UDP"
+	isBidir := r.Direction == "Bidirectional"
 
 	hasReceiver := r.ReceivedBps > 0
 
@@ -49,6 +60,15 @@ func FormatResult(r *model.TestResult) string {
 			if isUDP {
 				b.WriteString(fmt.Sprintf("Stream %d:  %.2f Mbps  Jitter: %.3f ms  Lost: %d/%d (%.2f%%)\n",
 					s.ID, s.SentMbps(), s.JitterMs, s.LostPackets, s.Packets, s.LostPercent))
+			} else if isBidir {
+				dir := "RX"
+				bps := s.ReceivedMbps()
+				if s.Sender {
+					dir = "TX"
+					bps = s.SentMbps()
+				}
+				b.WriteString(fmt.Sprintf("Stream %d [%s]:  %.2f Mbps\n",
+					s.ID, dir, bps))
 			} else if hasReceiver {
 				b.WriteString(fmt.Sprintf("Stream %d:  Sent: %.2f Mbps  Received: %.2f Mbps\n",
 					s.ID, s.SentMbps(), s.ReceivedMbps()))
@@ -64,6 +84,22 @@ func FormatResult(r *model.TestResult) string {
 		b.WriteString(fmt.Sprintf("Sent:            %.2f Mbps\n", r.SentMbps()))
 		b.WriteString(fmt.Sprintf("Jitter:          %.3f ms\n", r.JitterMs))
 		b.WriteString(fmt.Sprintf("Packet Loss:     %d/%d (%.2f%%)\n", r.LostPackets, r.Packets, r.LostPercent))
+	} else if isBidir {
+		b.WriteString(fmt.Sprintf("Send:            %.2f Mbps (retransmits: %d)\n", r.SentMbps(), r.Retransmits))
+		// Use explicit reverse summary if available, otherwise fall back to
+		// ReceivedBps which in --json-stream bidir mode represents reverse throughput.
+		revMbps := r.ReverseSentMbps()
+		revRetrans := r.ReverseRetransmits
+		if revMbps == 0 && r.ReceivedBps > 0 {
+			revMbps = r.ReceivedMbps()
+		}
+		b.WriteString(fmt.Sprintf("Receive:         %.2f Mbps (retransmits: %d)\n", revMbps, revRetrans))
+		totalSentMB := float64(r.BytesSent) / 1_000_000
+		totalRecvMB := float64(r.ReverseBytesReceived) / 1_000_000
+		if totalRecvMB == 0 {
+			totalRecvMB = float64(r.BytesReceived) / 1_000_000
+		}
+		b.WriteString(fmt.Sprintf("Transferred:     %.2f MB sent / %.2f MB received\n", totalSentMB, totalRecvMB))
 	} else if hasReceiver {
 		b.WriteString(fmt.Sprintf("Sent:            %.2f Mbps\n", r.SentMbps()))
 		b.WriteString(fmt.Sprintf("Received:        %.2f Mbps\n", r.ReceivedMbps()))
@@ -71,6 +107,10 @@ func FormatResult(r *model.TestResult) string {
 	} else {
 		b.WriteString(fmt.Sprintf("Bandwidth:       %.2f Mbps\n", r.SentMbps()))
 		b.WriteString(fmt.Sprintf("Retransmits:     %d\n", r.Retransmits))
+	}
+
+	if !isBidir && (r.BytesSent > 0 || r.BytesReceived > 0) {
+		b.WriteString(fmt.Sprintf("Transferred:     %.2f MB sent / %.2f MB received\n", r.SentMB(), r.ReceivedMB()))
 	}
 
 	sentOK, recvOK := r.VerifyStreamTotals()

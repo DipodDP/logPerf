@@ -103,6 +103,66 @@ func TestParseFlags_RemoteServer(t *testing.T) {
 	}
 }
 
+func TestParseFlags_ReverseFlag(t *testing.T) {
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	os.Args = []string{"iperf-tool", "-c", "10.0.0.1", "-R"}
+
+	cfg, err := ParseFlags()
+	if err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+	if !cfg.Reverse {
+		t.Error("Reverse should be true")
+	}
+}
+
+func TestParseFlags_BidirFlag(t *testing.T) {
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	os.Args = []string{"iperf-tool", "-c", "10.0.0.1", "-bidir"}
+
+	cfg, err := ParseFlags()
+	if err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+	if !cfg.Bidir {
+		t.Error("Bidir should be true")
+	}
+}
+
+func TestParseFlags_BandwidthFlag(t *testing.T) {
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	os.Args = []string{"iperf-tool", "-c", "10.0.0.1", "-b", "100M"}
+
+	cfg, err := ParseFlags()
+	if err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+	if cfg.Bandwidth != "100M" {
+		t.Errorf("Bandwidth = %q, want 100M", cfg.Bandwidth)
+	}
+}
+
+func TestParseFlags_CongestionFlag(t *testing.T) {
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	os.Args = []string{"iperf-tool", "-c", "10.0.0.1", "-C", "bbr"}
+
+	cfg, err := ParseFlags()
+	if err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+	if cfg.Congestion != "bbr" {
+		t.Errorf("Congestion = %q, want bbr", cfg.Congestion)
+	}
+}
+
 func TestParseFlags_MissingRequired(t *testing.T) {
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()

@@ -301,6 +301,205 @@ func TestFormatResultWithPing(t *testing.T) {
 	}
 }
 
+func TestFormatResultDirection(t *testing.T) {
+	r := &model.TestResult{
+		Timestamp:   time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
+		ServerAddr:  "192.168.1.1",
+		Port:        5201,
+		Protocol:    "TCP",
+		Parallel:    1,
+		Duration:    10,
+		Direction:   "Reverse",
+		SentBps:     940_000_000,
+		ReceivedBps: 936_000_000,
+		Retransmits: 5,
+		Streams:     []model.StreamResult{{ID: 1, SentBps: 940_000_000, ReceivedBps: 936_000_000}},
+	}
+
+	out := FormatResult(r)
+	if !strings.Contains(out, "Direction:       Reverse") {
+		t.Error("missing direction line")
+	}
+}
+
+func TestFormatResultDirectionNormal(t *testing.T) {
+	r := &model.TestResult{
+		Timestamp:   time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
+		ServerAddr:  "192.168.1.1",
+		Port:        5201,
+		Protocol:    "TCP",
+		Duration:    10,
+		SentBps:     940_000_000,
+		ReceivedBps: 936_000_000,
+		Streams:     []model.StreamResult{{ID: 1, SentBps: 940_000_000, ReceivedBps: 936_000_000}},
+	}
+
+	out := FormatResult(r)
+	if strings.Contains(out, "Direction:") {
+		t.Error("should not show Direction for normal mode")
+	}
+}
+
+func TestFormatResultCongestionAndBandwidth(t *testing.T) {
+	r := &model.TestResult{
+		Timestamp:   time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
+		ServerAddr:  "192.168.1.1",
+		Port:        5201,
+		Protocol:    "TCP",
+		Duration:    10,
+		Congestion:  "bbr",
+		Bandwidth:   "100M",
+		SentBps:     940_000_000,
+		ReceivedBps: 936_000_000,
+		Streams:     []model.StreamResult{{ID: 1, SentBps: 940_000_000, ReceivedBps: 936_000_000}},
+	}
+
+	out := FormatResult(r)
+	if !strings.Contains(out, "Congestion:      bbr") {
+		t.Error("missing congestion line")
+	}
+	if !strings.Contains(out, "Bandwidth Target: 100M") {
+		t.Error("missing bandwidth target line")
+	}
+}
+
+func TestFormatResultBytesTransferred(t *testing.T) {
+	r := &model.TestResult{
+		Timestamp:     time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
+		ServerAddr:    "192.168.1.1",
+		Port:          5201,
+		Protocol:      "TCP",
+		Duration:      10,
+		SentBps:       940_000_000,
+		ReceivedBps:   936_000_000,
+		BytesSent:     1175000000,
+		BytesReceived: 1170000000,
+		Streams:       []model.StreamResult{{ID: 1, SentBps: 940_000_000, ReceivedBps: 936_000_000}},
+	}
+
+	out := FormatResult(r)
+	if !strings.Contains(out, "Transferred:") {
+		t.Error("missing Transferred line")
+	}
+	if !strings.Contains(out, "1175.00 MB sent") {
+		t.Error("missing sent MB value")
+	}
+	if !strings.Contains(out, "1170.00 MB received") {
+		t.Error("missing received MB value")
+	}
+}
+
+func TestFormatResultBidir(t *testing.T) {
+	r := &model.TestResult{
+		Timestamp:            time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
+		ServerAddr:           "192.168.1.1",
+		Port:                 5201,
+		Protocol:             "TCP",
+		Parallel:             4,
+		Duration:             10,
+		Direction:            "Bidirectional",
+		SentBps:              400_000_000,
+		ReceivedBps:          396_000_000,
+		Retransmits:          2,
+		BytesSent:            500_000_000,
+		BytesReceived:        495_000_000,
+		ReverseSentBps:       480_000_000,
+		ReverseReceivedBps:   472_000_000,
+		ReverseRetransmits:   5,
+		ReverseBytesSent:     600_000_000,
+		ReverseBytesReceived: 590_000_000,
+		Streams: []model.StreamResult{
+			{ID: 1, SentBps: 200_000_000, ReceivedBps: 198_000_000, Retransmits: 1, Sender: true},
+			{ID: 2, SentBps: 200_000_000, ReceivedBps: 198_000_000, Retransmits: 1, Sender: true},
+			{ID: 3, SentBps: 240_000_000, ReceivedBps: 236_000_000, Retransmits: 3, Sender: false},
+			{ID: 4, SentBps: 240_000_000, ReceivedBps: 236_000_000, Retransmits: 2, Sender: false},
+		},
+	}
+
+	out := FormatResult(r)
+
+	// Per-stream labels
+	if !strings.Contains(out, "Stream 1 [TX]:") {
+		t.Error("missing TX label for stream 1")
+	}
+	if !strings.Contains(out, "Stream 3 [RX]:") {
+		t.Error("missing RX label for stream 3")
+	}
+
+	// Summary
+	if !strings.Contains(out, "Send:") {
+		t.Error("missing Send summary")
+	}
+	if !strings.Contains(out, "Receive:") {
+		t.Error("missing Receive summary")
+	}
+	if !strings.Contains(out, "400.00 Mbps") {
+		t.Error("missing forward sent Mbps")
+	}
+	if !strings.Contains(out, "480.00 Mbps") {
+		t.Error("missing reverse sent Mbps")
+	}
+	if !strings.Contains(out, "(retransmits: 2)") {
+		t.Error("missing forward retransmits")
+	}
+	if !strings.Contains(out, "(retransmits: 5)") {
+		t.Error("missing reverse retransmits")
+	}
+	if !strings.Contains(out, "Transferred:") {
+		t.Error("missing Transferred line")
+	}
+	if !strings.Contains(out, "500.00 MB sent") {
+		t.Error("missing sent MB")
+	}
+	if !strings.Contains(out, "590.00 MB received") {
+		t.Error("missing reverse received MB")
+	}
+	if !strings.Contains(out, "Direction:       Bidirectional") {
+		t.Error("missing direction line")
+	}
+	// Should NOT have WARNING since forward streams match
+	if strings.Contains(out, "WARNING") {
+		t.Error("should not have warning for bidir with matching forward streams")
+	}
+}
+
+func TestFormatResultBidirStreamModeFallback(t *testing.T) {
+	// In --json-stream bidir mode, sum_sent_bidir_reverse may be absent.
+	// The format should fall back to ReceivedBps for the Receive summary.
+	r := &model.TestResult{
+		Timestamp:     time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
+		ServerAddr:    "192.168.1.1",
+		Port:          5201,
+		Protocol:      "TCP",
+		Parallel:      4,
+		Duration:      10,
+		Direction:     "Bidirectional",
+		SentBps:       400_000_000,
+		ReceivedBps:   480_000_000, // fallback for reverse
+		Retransmits:   2,
+		BytesSent:     500_000_000,
+		BytesReceived: 600_000_000, // fallback for reverse bytes
+		// Reverse fields are 0 (not present in --json-stream end event)
+		Streams: []model.StreamResult{
+			{ID: 1, SentBps: 200_000_000, Sender: true},
+			{ID: 2, SentBps: 200_000_000, Sender: true},
+			{ID: 3, Sender: false}, // 0 bps — no per-stream data in --json-stream
+			{ID: 4, Sender: false},
+		},
+	}
+
+	out := FormatResult(r)
+
+	// Receive line should show the fallback ReceivedBps
+	if !strings.Contains(out, "Receive:         480.00 Mbps") {
+		t.Errorf("expected Receive fallback to ReceivedBps, got: %s", out)
+	}
+	// Transferred should use BytesReceived as fallback
+	if !strings.Contains(out, "600.00 MB received") {
+		t.Errorf("expected fallback to BytesReceived, got: %s", out)
+	}
+}
+
 func TestFormatResultError(t *testing.T) {
 	r := &model.TestResult{
 		Timestamp:  time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),

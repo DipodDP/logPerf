@@ -6,13 +6,15 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// readOnlyEntry is an Entry that allows selection and copy but rejects all edits.
-type readOnlyEntry struct {
+// ReadOnlyEntry is a custom text entry widget that allows selection and copying
+// but blocks all editing operations.
+type ReadOnlyEntry struct {
 	widget.Entry
 }
 
-func newReadOnlyEntry() *readOnlyEntry {
-	e := &readOnlyEntry{}
+// NewReadOnlyEntry creates a new read-only entry widget.
+func NewReadOnlyEntry() *ReadOnlyEntry {
+	e := &ReadOnlyEntry{}
 	e.MultiLine = true
 	e.TextStyle = fyne.TextStyle{Monospace: true}
 	e.ExtendBaseWidget(e)
@@ -20,10 +22,10 @@ func newReadOnlyEntry() *readOnlyEntry {
 }
 
 // TypedRune blocks all character input.
-func (e *readOnlyEntry) TypedRune(_ rune) {}
+func (e *ReadOnlyEntry) TypedRune(_ rune) {}
 
 // TypedKey allows only navigation and selection keys, blocks editing keys.
-func (e *readOnlyEntry) TypedKey(ev *fyne.KeyEvent) {
+func (e *ReadOnlyEntry) TypedKey(ev *fyne.KeyEvent) {
 	switch ev.Name {
 	case fyne.KeyBackspace, fyne.KeyDelete, fyne.KeyReturn, fyne.KeyEnter, fyne.KeyTab:
 		return // block editing keys
@@ -32,7 +34,7 @@ func (e *readOnlyEntry) TypedKey(ev *fyne.KeyEvent) {
 }
 
 // TypedShortcut allows copy and select-all, blocks cut and paste.
-func (e *readOnlyEntry) TypedShortcut(s fyne.Shortcut) {
+func (e *ReadOnlyEntry) TypedShortcut(s fyne.Shortcut) {
 	switch s.(type) {
 	case *fyne.ShortcutCopy, *fyne.ShortcutSelectAll:
 		e.Entry.TypedShortcut(s)

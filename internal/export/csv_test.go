@@ -228,6 +228,128 @@ func TestWriteCSV_WithPing(t *testing.T) {
 	}
 }
 
+func TestWriteCSV_NewColumns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "results.csv")
+
+	results := []model.TestResult{{
+		Timestamp:     time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+		ServerAddr:    "192.168.1.1",
+		Port:          5201,
+		Parallel:      1,
+		Duration:      10,
+		Protocol:      "TCP",
+		Direction:     "Reverse",
+		Bandwidth:     "100M",
+		Congestion:    "bbr",
+		SentBps:       940_000_000,
+		ReceivedBps:   936_000_000,
+		BytesSent:     1175000000,
+		BytesReceived: 1170000000,
+		Retransmits:   5,
+	}}
+
+	if err := WriteCSV(path, results); err != nil {
+		t.Fatalf("WriteCSV() error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+
+	content := string(data)
+
+	// Check new headers
+	for _, h := range []string{"Direction", "Bandwidth_Target", "Congestion", "Bytes_Sent", "Bytes_Received"} {
+		if !strings.Contains(content, h) {
+			t.Errorf("CSV should contain %s header", h)
+		}
+	}
+
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(lines))
+	}
+	// Check data row
+	if !strings.Contains(lines[1], "Reverse") {
+		t.Errorf("row should contain direction: %s", lines[1])
+	}
+	if !strings.Contains(lines[1], "100M") {
+		t.Errorf("row should contain bandwidth target: %s", lines[1])
+	}
+	if !strings.Contains(lines[1], "bbr") {
+		t.Errorf("row should contain congestion: %s", lines[1])
+	}
+	if !strings.Contains(lines[1], "1175000000") {
+		t.Errorf("row should contain bytes sent: %s", lines[1])
+	}
+	if !strings.Contains(lines[1], "1170000000") {
+		t.Errorf("row should contain bytes received: %s", lines[1])
+	}
+}
+
+func TestWriteCSV_Bidir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "results.csv")
+
+	results := []model.TestResult{{
+		Timestamp:            time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+		ServerAddr:           "192.168.1.1",
+		Port:                 5201,
+		Parallel:             2,
+		Duration:             10,
+		Protocol:             "TCP",
+		Direction:            "Bidirectional",
+		SentBps:              400_000_000,
+		ReceivedBps:          396_000_000,
+		Retransmits:          2,
+		BytesSent:            500_000_000,
+		BytesReceived:        495_000_000,
+		ReverseSentBps:       480_000_000,
+		ReverseReceivedBps:   472_000_000,
+		ReverseRetransmits:   5,
+		ReverseBytesSent:     600_000_000,
+		ReverseBytesReceived: 590_000_000,
+	}}
+
+	if err := WriteCSV(path, results); err != nil {
+		t.Fatalf("WriteCSV() error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+
+	content := string(data)
+
+	// Check reverse headers
+	for _, h := range []string{"Reverse_Sent_Mbps", "Reverse_Received_Mbps", "Reverse_Retransmits", "Reverse_Bytes_Sent", "Reverse_Bytes_Received"} {
+		if !strings.Contains(content, h) {
+			t.Errorf("CSV should contain %s header", h)
+		}
+	}
+
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(lines))
+	}
+	// Check reverse data values in row
+	if !strings.Contains(lines[1], "480.00") {
+		t.Errorf("row should contain reverse sent Mbps: %s", lines[1])
+	}
+	if !strings.Contains(lines[1], "472.00") {
+		t.Errorf("row should contain reverse received Mbps: %s", lines[1])
+	}
+	if !strings.Contains(lines[1], "600000000") {
+		t.Errorf("row should contain reverse bytes sent: %s", lines[1])
+	}
+	if !strings.Contains(lines[1], "590000000") {
+		t.Errorf("row should contain reverse bytes received: %s", lines[1])
+	}
+}
+
 func TestWriteCSV_WithError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "results.csv")

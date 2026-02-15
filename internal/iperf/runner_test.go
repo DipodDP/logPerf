@@ -54,7 +54,7 @@ func TestToArgs(t *testing.T) {
 	cfg.Interval = 1
 	cfg.Protocol = "tcp"
 
-	args := cfg.ToArgs()
+	args := cfg.ToArgs(true) // assume congestion supported in tests
 	expected := []string{"-c", "10.0.0.1", "-p", "5201", "-P", "4", "-t", "10", "-i", "1"}
 	if len(args) != len(expected) {
 		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
@@ -67,7 +67,7 @@ func TestToArgs(t *testing.T) {
 
 	// UDP should add -u flag
 	cfg.Protocol = "udp"
-	args = cfg.ToArgs()
+	args = cfg.ToArgs(true) // assume congestion supported in tests
 	found := false
 	for _, a := range args {
 		if a == "-u" {

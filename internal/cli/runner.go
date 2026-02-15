@@ -25,6 +25,10 @@ type RunnerConfig struct {
 	BinaryPath string
 	BlockSize   int
 	MeasurePing bool
+	Reverse    bool
+	Bidir      bool
+	Bandwidth  string
+	Congestion string
 
 	// Remote server (optional)
 	SSHHost     string
@@ -54,6 +58,10 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 		Interval:   cfg.Interval,
 		Protocol:   cfg.Protocol,
 		BlockSize:  cfg.BlockSize,
+		Reverse:    cfg.Reverse,
+		Bidir:      cfg.Bidir,
+		Bandwidth:  cfg.Bandwidth,
+		Congestion: cfg.Congestion,
 	}
 
 	if err := iperfCfg.Validate(); err != nil {
@@ -63,8 +71,14 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 	runner := iperf.NewRunner()
 	ctx := context.Background()
 
-	fmt.Printf("Starting test: %s:%d (%s, %d parallel, %ds duration)\n",
-		cfg.ServerAddr, cfg.Port, strings.ToUpper(cfg.Protocol), cfg.Parallel, cfg.Duration)
+	dirLabel := ""
+	if cfg.Reverse {
+		dirLabel = ", reverse"
+	} else if cfg.Bidir {
+		dirLabel = ", bidirectional"
+	}
+	fmt.Printf("Starting test: %s:%d (%s, %d parallel, %ds duration%s)\n",
+		cfg.ServerAddr, cfg.Port, strings.ToUpper(cfg.Protocol), cfg.Parallel, cfg.Duration, dirLabel)
 
 	// Phase 1: baseline ping (before iperf)
 	var baseline *ping.Result
@@ -118,6 +132,15 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Set config echo fields on the result
+	if cfg.Reverse {
+		result.Direction = "Reverse"
+	} else if cfg.Bidir {
+		result.Direction = "Bidirectional"
+	}
+	result.Bandwidth = cfg.Bandwidth
+	result.Congestion = cfg.Congestion
 
 	saveResults(result, cfg)
 	return result, nil

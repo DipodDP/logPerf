@@ -38,12 +38,15 @@ type iperfTimestamp struct {
 }
 
 type iperfEnd struct {
-	SumSent     iperfSum        `json:"sum_sent"`
-	SumReceived iperfSum        `json:"sum_received"`
-	Streams     []iperfStreamEnd `json:"streams"`
+	SumSent                 iperfSum         `json:"sum_sent"`
+	SumReceived             iperfSum         `json:"sum_received"`
+	SumSentBidirReverse     iperfSum         `json:"sum_sent_bidir_reverse"`
+	SumReceivedBidirReverse iperfSum         `json:"sum_received_bidir_reverse"`
+	Streams                 []iperfStreamEnd `json:"streams"`
 }
 
 type iperfSum struct {
+	Bytes         int64   `json:"bytes"`
 	BitsPerSecond float64 `json:"bits_per_second"`
 	Retransmits   int     `json:"retransmits"`
 	JitterMs      float64 `json:"jitter_ms"`
@@ -71,6 +74,7 @@ type iperfStreamSide struct {
 	Socket        int     `json:"socket"`
 	BitsPerSecond float64 `json:"bits_per_second"`
 	Retransmits   int     `json:"retransmits"`
+	Sender        bool    `json:"sender"`
 }
 
 // streamEvent represents a single line from iperf3 --json-stream output.
@@ -142,14 +146,21 @@ func ParseEndData(data json.RawMessage) (*model.TestResult, error) {
 		return nil, fmt.Errorf("parse end data: %w", err)
 	}
 	result := &model.TestResult{
-		Timestamp:   time.Now(),
-		SentBps:     end.SumSent.BitsPerSecond,
-		ReceivedBps: end.SumReceived.BitsPerSecond,
-		Retransmits: end.SumSent.Retransmits,
-		JitterMs:    end.SumSent.JitterMs,
-		LostPackets: end.SumSent.LostPackets,
-		LostPercent: end.SumSent.LostPercent,
-		Packets:     end.SumSent.Packets,
+		Timestamp:            time.Now(),
+		SentBps:              end.SumSent.BitsPerSecond,
+		ReceivedBps:          end.SumReceived.BitsPerSecond,
+		Retransmits:          end.SumSent.Retransmits,
+		JitterMs:             end.SumSent.JitterMs,
+		LostPackets:          end.SumSent.LostPackets,
+		LostPercent:          end.SumSent.LostPercent,
+		Packets:              end.SumSent.Packets,
+		BytesSent:            end.SumSent.Bytes,
+		BytesReceived:        end.SumReceived.Bytes,
+		ReverseSentBps:       end.SumSentBidirReverse.BitsPerSecond,
+		ReverseReceivedBps:   end.SumReceivedBidirReverse.BitsPerSecond,
+		ReverseRetransmits:   end.SumSentBidirReverse.Retransmits,
+		ReverseBytesSent:     end.SumSentBidirReverse.Bytes,
+		ReverseBytesReceived: end.SumReceivedBidirReverse.Bytes,
 	}
 	for i, s := range end.Streams {
 		if s.UDP != nil {
@@ -167,9 +178,11 @@ func ParseEndData(data json.RawMessage) (*model.TestResult, error) {
 				SentBps:     s.Sender.BitsPerSecond,
 				ReceivedBps: s.Receiver.BitsPerSecond,
 				Retransmits: s.Sender.Retransmits,
+				Sender:      s.Sender.Sender,
 			})
 		}
 	}
+	fillReverseSummaryFromStreams(result)
 	return result, nil
 }
 
@@ -200,17 +213,24 @@ func ParseResult(jsonData []byte) (*model.TestResult, error) {
 	}
 
 	result := &model.TestResult{
-		Timestamp:   time.Now(),
-		SentBps:     out.End.SumSent.BitsPerSecond,
-		ReceivedBps: out.End.SumReceived.BitsPerSecond,
-		Retransmits: out.End.SumSent.Retransmits,
-		JitterMs:    out.End.SumSent.JitterMs,
-		LostPackets: out.End.SumSent.LostPackets,
-		LostPercent: out.End.SumSent.LostPercent,
-		Packets:     out.End.SumSent.Packets,
-		Protocol:    out.Start.TestStart.Protocol,
-		Parallel:    out.Start.TestStart.NumStreams,
-		Duration:    out.Start.TestStart.Duration,
+		Timestamp:            time.Now(),
+		SentBps:              out.End.SumSent.BitsPerSecond,
+		ReceivedBps:          out.End.SumReceived.BitsPerSecond,
+		Retransmits:          out.End.SumSent.Retransmits,
+		JitterMs:             out.End.SumSent.JitterMs,
+		LostPackets:          out.End.SumSent.LostPackets,
+		LostPercent:          out.End.SumSent.LostPercent,
+		Packets:              out.End.SumSent.Packets,
+		BytesSent:            out.End.SumSent.Bytes,
+		BytesReceived:        out.End.SumReceived.Bytes,
+		ReverseSentBps:       out.End.SumSentBidirReverse.BitsPerSecond,
+		ReverseReceivedBps:   out.End.SumReceivedBidirReverse.BitsPerSecond,
+		ReverseRetransmits:   out.End.SumSentBidirReverse.Retransmits,
+		ReverseBytesSent:     out.End.SumSentBidirReverse.Bytes,
+		ReverseBytesReceived: out.End.SumReceivedBidirReverse.Bytes,
+		Protocol:             out.Start.TestStart.Protocol,
+		Parallel:             out.Start.TestStart.NumStreams,
+		Duration:             out.Start.TestStart.Duration,
 	}
 
 	if out.Start.Timestamp.TimeSecs > 0 {
@@ -238,6 +258,7 @@ func ParseResult(jsonData []byte) (*model.TestResult, error) {
 				SentBps:     s.Sender.BitsPerSecond,
 				ReceivedBps: s.Receiver.BitsPerSecond,
 				Retransmits: s.Sender.Retransmits,
+				Sender:      s.Sender.Sender,
 			})
 		}
 	}
@@ -246,5 +267,40 @@ func ParseResult(jsonData []byte) (*model.TestResult, error) {
 		result.Error = out.Error
 	}
 
+	fillReverseSummaryFromStreams(result)
 	return result, nil
+}
+
+// fillReverseSummaryFromStreams computes reverse summary fields from per-stream
+// data when the JSON didn't include sum_sent_bidir_reverse / sum_received_bidir_reverse
+// (e.g. in --json-stream mode). Only acts when reverse summary is missing but
+// reverse streams (Sender=false) are present.
+func fillReverseSummaryFromStreams(r *model.TestResult) {
+	if r.ReverseSentBps != 0 {
+		return // already populated from JSON
+	}
+	var sentBps, recvBps float64
+	var retransmits int
+	hasReverse := false
+	for _, s := range r.Streams {
+		if !s.Sender {
+			hasReverse = true
+			sentBps += s.SentBps
+			recvBps += s.ReceivedBps
+			retransmits += s.Retransmits
+		}
+	}
+	if !hasReverse {
+		return
+	}
+	// In --json-stream bidir mode, reverse streams have SentBps=0 (the client
+	// is receiving, not sending). Use ReceivedBps as the throughput metric.
+	if sentBps == 0 && recvBps > 0 {
+		r.ReverseSentBps = recvBps
+		r.ReverseReceivedBps = recvBps
+	} else {
+		r.ReverseSentBps = sentBps
+		r.ReverseReceivedBps = recvBps
+	}
+	r.ReverseRetransmits = retransmits
 }

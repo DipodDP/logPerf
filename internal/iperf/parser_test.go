@@ -141,6 +141,33 @@ func TestParseResultWithError(t *testing.T) {
 	}
 }
 
+func TestParseResultBytes(t *testing.T) {
+	result, err := ParseResult([]byte(sampleJSON))
+	if err != nil {
+		t.Fatalf("ParseResult() error: %v", err)
+	}
+	if result.BytesSent != 1175000000 {
+		t.Errorf("BytesSent = %d, want 1175000000", result.BytesSent)
+	}
+	if result.BytesReceived != 1170000000 {
+		t.Errorf("BytesReceived = %d, want 1170000000", result.BytesReceived)
+	}
+}
+
+func TestParseEndDataBytes(t *testing.T) {
+	ev, _ := ParseStreamEvent([]byte(sampleEndEvent))
+	result, err := ParseEndData(ev.Data)
+	if err != nil {
+		t.Fatalf("ParseEndData() error: %v", err)
+	}
+	if result.BytesSent != 1175000000 {
+		t.Errorf("BytesSent = %d, want 1175000000", result.BytesSent)
+	}
+	if result.BytesReceived != 1170000000 {
+		t.Errorf("BytesReceived = %d, want 1170000000", result.BytesReceived)
+	}
+}
+
 func TestParseResultInvalidJSON(t *testing.T) {
 	_, err := ParseResult([]byte("not json"))
 	if err == nil {
@@ -394,6 +421,190 @@ func TestParseEndDataUDP(t *testing.T) {
 	}
 	if math.Abs(s.JitterMs-0.025) > 0.001 {
 		t.Errorf("Stream JitterMs = %f, want 0.025", s.JitterMs)
+	}
+}
+
+const sampleBidirJSON = `{
+	"start": {
+		"connected": [
+			{"socket": 5, "local_host": "192.168.1.100", "local_port": 43210, "remote_host": "192.168.1.1", "remote_port": 5201},
+			{"socket": 6, "local_host": "192.168.1.100", "local_port": 43211, "remote_host": "192.168.1.1", "remote_port": 5201}
+		],
+		"test_start": {
+			"protocol": "TCP",
+			"num_streams": 2,
+			"duration": 10
+		},
+		"timestamp": {"timesecs": 1704110400}
+	},
+	"intervals": [],
+	"end": {
+		"sum_sent": {
+			"bytes": 500000000,
+			"bits_per_second": 400000000.0,
+			"retransmits": 2,
+			"sender": true
+		},
+		"sum_received": {
+			"bytes": 495000000,
+			"bits_per_second": 396000000.0,
+			"sender": false
+		},
+		"sum_sent_bidir_reverse": {
+			"bytes": 600000000,
+			"bits_per_second": 480000000.0,
+			"retransmits": 5,
+			"sender": true
+		},
+		"sum_received_bidir_reverse": {
+			"bytes": 590000000,
+			"bits_per_second": 472000000.0,
+			"sender": false
+		},
+		"streams": [
+			{
+				"sender": {"socket": 5, "bits_per_second": 200000000.0, "retransmits": 1, "sender": true},
+				"receiver": {"socket": 5, "bits_per_second": 198000000.0}
+			},
+			{
+				"sender": {"socket": 6, "bits_per_second": 200000000.0, "retransmits": 1, "sender": true},
+				"receiver": {"socket": 6, "bits_per_second": 198000000.0}
+			},
+			{
+				"sender": {"socket": 7, "bits_per_second": 240000000.0, "retransmits": 3, "sender": false},
+				"receiver": {"socket": 7, "bits_per_second": 236000000.0}
+			},
+			{
+				"sender": {"socket": 8, "bits_per_second": 240000000.0, "retransmits": 2, "sender": false},
+				"receiver": {"socket": 8, "bits_per_second": 236000000.0}
+			}
+		]
+	}
+}`
+
+func TestParseResultBidir(t *testing.T) {
+	result, err := ParseResult([]byte(sampleBidirJSON))
+	if err != nil {
+		t.Fatalf("ParseResult() error: %v", err)
+	}
+
+	// Forward direction
+	if math.Abs(result.SentBps-400000000.0) > 1 {
+		t.Errorf("SentBps = %f, want 400000000", result.SentBps)
+	}
+	if math.Abs(result.ReceivedBps-396000000.0) > 1 {
+		t.Errorf("ReceivedBps = %f, want 396000000", result.ReceivedBps)
+	}
+	if result.Retransmits != 2 {
+		t.Errorf("Retransmits = %d, want 2", result.Retransmits)
+	}
+	if result.BytesSent != 500000000 {
+		t.Errorf("BytesSent = %d, want 500000000", result.BytesSent)
+	}
+
+	// Reverse direction
+	if math.Abs(result.ReverseSentBps-480000000.0) > 1 {
+		t.Errorf("ReverseSentBps = %f, want 480000000", result.ReverseSentBps)
+	}
+	if math.Abs(result.ReverseReceivedBps-472000000.0) > 1 {
+		t.Errorf("ReverseReceivedBps = %f, want 472000000", result.ReverseReceivedBps)
+	}
+	if result.ReverseRetransmits != 5 {
+		t.Errorf("ReverseRetransmits = %d, want 5", result.ReverseRetransmits)
+	}
+	if result.ReverseBytesSent != 600000000 {
+		t.Errorf("ReverseBytesSent = %d, want 600000000", result.ReverseBytesSent)
+	}
+	if result.ReverseBytesReceived != 590000000 {
+		t.Errorf("ReverseBytesReceived = %d, want 590000000", result.ReverseBytesReceived)
+	}
+
+	// 4 streams: 2 TX (sender=true) + 2 RX (sender=false)
+	if len(result.Streams) != 4 {
+		t.Fatalf("Streams count = %d, want 4", len(result.Streams))
+	}
+	if !result.Streams[0].Sender {
+		t.Error("Streams[0].Sender should be true (TX)")
+	}
+	if !result.Streams[1].Sender {
+		t.Error("Streams[1].Sender should be true (TX)")
+	}
+	if result.Streams[2].Sender {
+		t.Error("Streams[2].Sender should be false (RX)")
+	}
+	if result.Streams[3].Sender {
+		t.Error("Streams[3].Sender should be false (RX)")
+	}
+
+	// Verify helper methods
+	if math.Abs(result.ReverseSentMbps()-480.0) > 0.01 {
+		t.Errorf("ReverseSentMbps() = %f, want 480.0", result.ReverseSentMbps())
+	}
+	if math.Abs(result.ReverseReceivedMbps()-472.0) > 0.01 {
+		t.Errorf("ReverseReceivedMbps() = %f, want 472.0", result.ReverseReceivedMbps())
+	}
+
+	// VerifyStreamTotals in bidir mode should only check forward streams
+	result.Direction = "Bidirectional"
+	sentOK, recvOK := result.VerifyStreamTotals()
+	if !sentOK {
+		t.Error("VerifyStreamTotals sentOK should be true for bidir forward streams")
+	}
+	if !recvOK {
+		t.Error("VerifyStreamTotals recvOK should be true for bidir forward streams")
+	}
+}
+
+const sampleBidirEndEvent = `{"event":"end","data":{"sum_sent":{"bytes":500000000,"bits_per_second":400000000,"retransmits":2,"sender":true},"sum_received":{"bytes":495000000,"bits_per_second":396000000,"sender":false},"sum_sent_bidir_reverse":{"bytes":600000000,"bits_per_second":480000000,"retransmits":5,"sender":true},"sum_received_bidir_reverse":{"bytes":590000000,"bits_per_second":472000000,"sender":false},"streams":[{"sender":{"socket":5,"bits_per_second":400000000,"retransmits":2,"sender":true},"receiver":{"socket":5,"bits_per_second":396000000}},{"sender":{"socket":7,"bits_per_second":480000000,"retransmits":5,"sender":false},"receiver":{"socket":7,"bits_per_second":472000000}}]}}`
+
+func TestParseEndDataBidir(t *testing.T) {
+	ev, _ := ParseStreamEvent([]byte(sampleBidirEndEvent))
+	result, err := ParseEndData(ev.Data)
+	if err != nil {
+		t.Fatalf("ParseEndData() error: %v", err)
+	}
+	if math.Abs(result.ReverseSentBps-480000000) > 1 {
+		t.Errorf("ReverseSentBps = %f, want 480000000", result.ReverseSentBps)
+	}
+	if result.ReverseRetransmits != 5 {
+		t.Errorf("ReverseRetransmits = %d, want 5", result.ReverseRetransmits)
+	}
+	if result.ReverseBytesSent != 600000000 {
+		t.Errorf("ReverseBytesSent = %d, want 600000000", result.ReverseBytesSent)
+	}
+	if len(result.Streams) != 2 {
+		t.Fatalf("Streams count = %d, want 2", len(result.Streams))
+	}
+	if !result.Streams[0].Sender {
+		t.Error("Streams[0].Sender should be true")
+	}
+	if result.Streams[1].Sender {
+		t.Error("Streams[1].Sender should be false")
+	}
+}
+
+// Simulates --json-stream bidir mode: no sum_sent_bidir_reverse, and reverse
+// streams have sender.bits_per_second=0 but receiver.bits_per_second has data.
+const sampleBidirStreamEndEvent = `{"event":"end","data":{"sum_sent":{"bytes":500000000,"bits_per_second":400000000,"retransmits":2,"sender":true},"sum_received":{"bytes":495000000,"bits_per_second":0,"sender":false},"streams":[{"sender":{"socket":5,"bits_per_second":200000000,"retransmits":1,"sender":true},"receiver":{"socket":5,"bits_per_second":198000000}},{"sender":{"socket":6,"bits_per_second":200000000,"retransmits":1,"sender":true},"receiver":{"socket":6,"bits_per_second":198000000}},{"sender":{"socket":7,"bits_per_second":0,"retransmits":0,"sender":false},"receiver":{"socket":7,"bits_per_second":240000000}},{"sender":{"socket":8,"bits_per_second":0,"retransmits":0,"sender":false},"receiver":{"socket":8,"bits_per_second":232000000}}]}}`
+
+func TestParseEndDataBidirStreamFallback(t *testing.T) {
+	ev, _ := ParseStreamEvent([]byte(sampleBidirStreamEndEvent))
+	result, err := ParseEndData(ev.Data)
+	if err != nil {
+		t.Fatalf("ParseEndData() error: %v", err)
+	}
+	// ReverseSentBps should be computed from per-stream ReceivedBps
+	// since sender.bits_per_second=0 for reverse streams.
+	// Expected: 240000000 + 232000000 = 472000000
+	if math.Abs(result.ReverseSentBps-472000000) > 1 {
+		t.Errorf("ReverseSentBps = %f, want 472000000 (from per-stream receiver)", result.ReverseSentBps)
+	}
+	if len(result.Streams) != 4 {
+		t.Fatalf("Streams count = %d, want 4", len(result.Streams))
+	}
+	// RX streams should have ReceivedBps set
+	if math.Abs(result.Streams[2].ReceivedBps-240000000) > 1 {
+		t.Errorf("Streams[2].ReceivedBps = %f, want 240000000", result.Streams[2].ReceivedBps)
 	}
 }
 

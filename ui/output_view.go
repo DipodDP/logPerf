@@ -8,7 +8,7 @@ import (
 // OutputView displays live scrolling output from iperf3.
 // Text is selectable and copiable.
 type OutputView struct {
-	text      *readOnlyEntry
+	text      *ReadOnlyEntry
 	scrollBox *container.Scroll
 }
 
@@ -16,18 +16,18 @@ type OutputView struct {
 func NewOutputView() *OutputView {
 	ov := &OutputView{}
 
-	ov.text = newReadOnlyEntry()
+	ov.text = NewReadOnlyEntry()
 	ov.text.Wrapping = fyne.TextWrapWord
 
 	ov.scrollBox = container.NewVScroll(ov.text)
-	ov.scrollBox.SetMinSize(fyne.NewSize(800, 250))
+	ov.scrollBox.SetMinSize(NewOutputViewMinSize())
 
 	return ov
 }
 
 // Container returns the output view's container.
-func (ov *OutputView) Container() *container.Scroll {
-	return ov.scrollBox
+func (ov *OutputView) Container() *fyne.Container {
+	return container.NewMax(ov.scrollBox)
 }
 
 // AppendLine adds a line to the output view, safe to call from any goroutine.

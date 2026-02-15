@@ -45,6 +45,13 @@ func ParseFlags() (*RunnerConfig, error) {
 	fs.IntVar(&cfg.BlockSize, "l", 0, "Block size (buffer/datagram size in bytes)")
 	fs.IntVar(&cfg.BlockSize, "block-size", 0, "Block size (buffer/datagram size in bytes)")
 	fs.BoolVar(&cfg.MeasurePing, "ping", false, "Measure latency before and during test")
+	fs.BoolVar(&cfg.Reverse, "R", false, "Reverse mode (server sends, client receives)")
+	fs.BoolVar(&cfg.Reverse, "reverse", false, "Reverse mode (server sends, client receives)")
+	fs.BoolVar(&cfg.Bidir, "bidir", false, "Bidirectional mode (simultaneous both directions)")
+	fs.StringVar(&cfg.Bandwidth, "b", "", "Target bandwidth (e.g. 100M, 1G)")
+	fs.StringVar(&cfg.Bandwidth, "bandwidth", "", "Target bandwidth (e.g. 100M, 1G)")
+	fs.StringVar(&cfg.Congestion, "C", "", "TCP congestion algorithm (e.g. bbr, cubic)")
+	fs.StringVar(&cfg.Congestion, "congestion", "", "TCP congestion algorithm (e.g. bbr, cubic)")
 	fs.StringVar(&cfg.BinaryPath, "binary", cfg.BinaryPath, "Path to iperf3 binary")
 
 	// Remote server flags
@@ -99,6 +106,10 @@ LOCAL TEST MODE:
   -i, -interval <sec>      Reporting interval (default: 1)
   -u <udp|tcp>             Protocol mode (default: tcp)
   -l, -block-size <bytes>  Block size / buffer length (default: iperf3 default)
+  -R, -reverse             Reverse mode (server sends, client receives)
+  --bidir                  Bidirectional mode (simultaneous both directions)
+  -b, -bandwidth <rate>    Target bandwidth (e.g. 100M, 1G; empty = unlimited)
+  -C, -congestion <algo>   TCP congestion algorithm (e.g. bbr, cubic)
   --ping                   Measure latency before and during test
   -binary <path>           Path to iperf3 binary (default: iperf3)
 

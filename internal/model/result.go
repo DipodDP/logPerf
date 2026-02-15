@@ -46,6 +46,7 @@ type StreamResult struct {
 	LostPackets int
 	LostPercent float64
 	Packets     int
+	Sender      bool // true = forward/TX stream, false = reverse/RX stream (bidir mode)
 }
 
 // SentMbps returns the sent throughput in Mbps.
@@ -60,25 +61,35 @@ func (s *StreamResult) ReceivedMbps() float64 {
 
 // TestResult holds the parsed output of a single iperf3 test run.
 type TestResult struct {
-	Timestamp   time.Time
-	ServerAddr  string
-	Port        int
-	Parallel    int
-	Duration    int
-	Interval    int
-	Protocol    string
-	SentBps     float64
-	ReceivedBps float64
-	Retransmits int
-	JitterMs    float64
-	LostPackets int
-	LostPercent float64
-	Packets     int
-	Streams     []StreamResult
-	Intervals    []IntervalResult
-	PingBaseline *PingResult
-	PingLoaded   *PingResult
-	Error        string
+	Timestamp     time.Time
+	ServerAddr    string
+	Port          int
+	Parallel      int
+	Duration      int
+	Interval      int
+	Protocol      string
+	SentBps       float64
+	ReceivedBps   float64
+	Retransmits   int
+	JitterMs      float64
+	LostPackets   int
+	LostPercent   float64
+	Packets       int
+	BytesSent     int64  // total bytes sent
+	BytesReceived int64  // total bytes received
+	Direction     string // "Reverse", "Bidirectional", or "" (normal)
+	Bandwidth            string // target bandwidth setting used
+	Congestion           string // congestion algorithm used
+	ReverseSentBps       float64 // bidir reverse: sent bps
+	ReverseReceivedBps   float64 // bidir reverse: received bps
+	ReverseRetransmits   int     // bidir reverse: retransmits
+	ReverseBytesSent     int64   // bidir reverse: bytes sent
+	ReverseBytesReceived int64   // bidir reverse: bytes received
+	Streams              []StreamResult
+	Intervals     []IntervalResult
+	PingBaseline  *PingResult
+	PingLoaded    *PingResult
+	Error         string
 }
 
 // SentMbps returns the sent throughput in Mbps.
@@ -89,6 +100,26 @@ func (r *TestResult) SentMbps() float64 {
 // ReceivedMbps returns the received throughput in Mbps.
 func (r *TestResult) ReceivedMbps() float64 {
 	return r.ReceivedBps / 1_000_000
+}
+
+// SentMB returns the total bytes sent in megabytes.
+func (r *TestResult) SentMB() float64 {
+	return float64(r.BytesSent) / 1_000_000
+}
+
+// ReceivedMB returns the total bytes received in megabytes.
+func (r *TestResult) ReceivedMB() float64 {
+	return float64(r.BytesReceived) / 1_000_000
+}
+
+// ReverseSentMbps returns the reverse-direction sent throughput in Mbps.
+func (r *TestResult) ReverseSentMbps() float64 {
+	return r.ReverseSentBps / 1_000_000
+}
+
+// ReverseReceivedMbps returns the reverse-direction received throughput in Mbps.
+func (r *TestResult) ReverseReceivedMbps() float64 {
+	return r.ReverseReceivedBps / 1_000_000
 }
 
 // Status returns "OK" or the error string.
@@ -118,8 +149,14 @@ func (r *TestResult) VerifyStreamTotals() (sentOK, recvOK bool) {
 		return sentOK, true
 	}
 
+	// In bidir mode, only sum forward streams (Sender=true) for verification.
+	isBidir := r.Direction == "Bidirectional"
+
 	var sentSum, recvSum float64
 	for _, s := range r.Streams {
+		if isBidir && !s.Sender {
+			continue // skip reverse streams for forward summary verification
+		}
 		sentSum += s.SentBps
 		recvSum += s.ReceivedBps
 	}

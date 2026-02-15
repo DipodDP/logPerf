@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"strings"
 	"sync"
 	"time"
@@ -30,33 +31,45 @@ type Controls struct {
 	mu    sync.Mutex
 	state testState
 
-	startBtn *widget.Button
-	stopBtn  *widget.Button
+	startBtn *StyledButton
+	stopBtn  *StyledButton
+	fileNameEntry *widget.Entry
 
-	configForm  *ConfigForm
-	outputView  *OutputView
-	historyView *HistoryView
-	remotePanel *RemotePanel
-	runner      *iperf.Runner
+	configForm     *ConfigForm
+	outputView     *OutputView
+	savedFilesList *SavedFilesList
+	remotePanel    *RemotePanel
+	runner         *iperf.Runner
 
 	container *fyne.Container
 }
 
 // NewControls creates the control buttons wired to the given views.
-func NewControls(cf *ConfigForm, ov *OutputView, hv *HistoryView, rp *RemotePanel) *Controls {
+func NewControls(cf *ConfigForm, ov *OutputView, sfl *SavedFilesList, rp *RemotePanel) *Controls {
 	c := &Controls{
-		configForm:  cf,
-		outputView:  ov,
-		historyView: hv,
-		remotePanel: rp,
-		runner:      iperf.NewRunner(),
+		configForm:     cf,
+		outputView:     ov,
+		savedFilesList: sfl,
+		remotePanel:    rp,
+		runner:         iperf.NewRunner(),
 	}
 
-	c.startBtn = widget.NewButton("Start Test", c.onStart)
-	c.stopBtn = widget.NewButton("Stop Test", c.onStop)
+	white := color.White
+	greenBg := color.NRGBA{R: 40, G: 167, B: 69, A: 255}
+	redBg := color.NRGBA{R: 220, G: 53, B: 69, A: 255}
+	c.startBtn = NewStyledButton("Start Test", c.onStart, greenBg, white)
+	c.stopBtn = NewStyledButton("Stop Test", c.onStop, redBg, white)
 	c.stopBtn.Disable()
 
-	c.container = container.NewHBox(c.startBtn, c.stopBtn)
+	c.fileNameEntry = widget.NewEntry()
+	c.fileNameEntry.SetPlaceHolder("results.csv")
+
+	c.container = container.NewVBox(
+		c.startBtn,
+		c.stopBtn,
+		widget.NewLabel("Output File"),
+		c.fileNameEntry,
+	)
 	return c
 }
 
@@ -127,6 +140,12 @@ func (c *Controls) onStart() {
 		_, versionErr := iperf.CheckVersion(cfg.BinaryPath)
 		useStream := versionErr == nil
 
+		// Check congestion control support
+		supportsCongestion := iperf.SupportsCongestionControl(cfg.BinaryPath)
+		if cfg.Congestion != "" && !supportsCongestion {
+			c.outputView.AppendLine("Warning: Congestion control not supported on this platform, ignoring -C flag")
+		}
+
 		result, err := c.runTest(cfg, useStream)
 
 		// If the server is busy and we have an SSH connection, restart and retry once.
@@ -169,6 +188,20 @@ func (c *Controls) onStart() {
 			}
 		}
 
+		// Set config echo fields on the result
+		if result != nil {
+			if cfg.Reverse {
+				result.Direction = "Reverse"
+			} else if cfg.Bidir {
+				result.Direction = "Bidirectional"
+			}
+			result.Bandwidth = cfg.Bandwidth
+			// Only set congestion if it was actually used (platform supports it)
+			if supportsCongestion {
+				result.Congestion = cfg.Congestion
+			}
+		}
+
 		if err != nil {
 			c.outputView.AppendLine(fmt.Sprintf("Error: %v", err))
 			errResult := model.TestResult{
@@ -180,7 +213,6 @@ func (c *Controls) onStart() {
 				Parallel:   cfg.Parallel,
 				Error:      err.Error(),
 			}
-			c.historyView.AddResult(errResult)
 			c.autoSave(&errResult)
 			return
 		}
@@ -193,7 +225,6 @@ func (c *Controls) onStart() {
 			c.outputView.AppendLine(format.FormatResult(result))
 		}
 
-		c.historyView.AddResult(*result)
 		c.autoSave(result)
 	}()
 }
@@ -227,18 +258,20 @@ func (c *Controls) onStop() {
 }
 
 func (c *Controls) autoSave(result *model.TestResult) {
-	const (
-		csvPath         = "iperf_results.csv"
-		txtPath         = "iperf_results.txt"
-		intervalLogPath = "iperf_results_log.csv"
-	)
+	baseName := strings.TrimSuffix(c.fileNameEntry.Text, ".csv")
+	if baseName == "" {
+		baseName = "results"
+	}
+
+	csvPath := baseName + ".csv"
+	txtPath := baseName + ".txt"
+	intervalLogPath := baseName + "_log.csv"
 
 	if err := export.WriteCSV(csvPath, []model.TestResult{*result}); err != nil {
 		c.outputView.AppendLine(fmt.Sprintf("Auto-save CSV error: %v", err))
 	}
 
-	allResults := c.historyView.Results()
-	if err := export.WriteTXT(txtPath, allResults); err != nil {
+	if err := export.WriteTXT(txtPath, []model.TestResult{*result}); err != nil {
 		c.outputView.AppendLine(fmt.Sprintf("Auto-save TXT error: %v", err))
 	}
 
@@ -249,6 +282,11 @@ func (c *Controls) autoSave(result *model.TestResult) {
 	}
 
 	c.outputView.AppendLine(fmt.Sprintf("Results saved to %s, %s", csvPath, txtPath))
+
+	// Refresh file list on UI thread
+	fyne.Do(func() {
+		c.savedFilesList.Refresh()
+	})
 }
 
 func (c *Controls) resetState() {

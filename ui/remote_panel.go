@@ -5,7 +5,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-"fyne.io/fyne/v2/widget"
+	"fyne.io/fyne/v2/widget"
 
 	internalssh "iperf-tool/internal/ssh"
 )
@@ -23,7 +23,7 @@ type RemotePanel struct {
 	installBtn    *widget.Button
 	startSrvBtn   *widget.Button
 	stopSrvBtn    *widget.Button
-	statusEntry *readOnlyEntry
+	statusEntry *ReadOnlyEntry
 
 	client    *internalssh.Client
 	srvMgr    *internalssh.ServerManager
@@ -37,26 +37,26 @@ func NewRemotePanel() *RemotePanel {
 	}
 
 	rp.hostEntry = widget.NewEntry()
-	rp.hostEntry.SetPlaceHolder("SSH host")
+	rp.hostEntry.SetPlaceHolder("192.168.1.100")
 
 	rp.userEntry = widget.NewEntry()
-	rp.userEntry.SetPlaceHolder("username")
+	rp.userEntry.SetPlaceHolder("root")
 
 	rp.keyPathEntry = widget.NewEntry()
-	rp.keyPathEntry.SetPlaceHolder("auto (~/.ssh/id_*)")
+	rp.keyPathEntry.SetPlaceHolder("~/.ssh/id_rsa")
 
 	rp.passwordEntry = widget.NewPasswordEntry()
-	rp.passwordEntry.SetPlaceHolder("password (optional)")
+	rp.passwordEntry.SetPlaceHolder("Optional")
 
 	rp.portEntry = widget.NewEntry()
 	rp.portEntry.SetText("5201")
 
-	rp.statusEntry = newReadOnlyEntry()
+	rp.statusEntry = NewReadOnlyEntry()
 	rp.statusEntry.MultiLine = false
 	rp.statusEntry.SetText("Disconnected")
 
-	rp.connectBtn = widget.NewButton("Connect", rp.onConnect)
-	rp.disconnectBtn = widget.NewButton("Disconnect", rp.onDisconnect)
+	rp.connectBtn = widget.NewButton("Connect SSH", rp.onConnect)
+	rp.disconnectBtn = widget.NewButton("Disconnect SSH", rp.onDisconnect)
 	rp.disconnectBtn.Disable()
 
 	rp.installBtn = widget.NewButton("Install iperf3", rp.onInstall)
@@ -67,23 +67,28 @@ func NewRemotePanel() *RemotePanel {
 	rp.stopSrvBtn = widget.NewButton("Stop Server", rp.onStopServer)
 	rp.stopSrvBtn.Disable()
 
-	rp.container = container.NewVBox(
-		widget.NewLabelWithStyle("Remote Server (SSH)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewLabel("Host"),
-		rp.hostEntry,
-		widget.NewLabel("User"),
-		rp.userEntry,
-		widget.NewLabel("SSH Key Path"),
-		rp.keyPathEntry,
-		widget.NewLabel("Password"),
-		rp.passwordEntry,
+	connection := container.NewVBox(
+		widget.NewLabel("Host"), rp.hostEntry,
+		widget.NewLabel("Username"), rp.userEntry,
+		widget.NewLabel("SSH Key Path"), rp.keyPathEntry,
+		widget.NewLabel("Password"), rp.passwordEntry,
 		container.NewHBox(rp.connectBtn, rp.disconnectBtn),
-		widget.NewSeparator(),
-		widget.NewLabel("iperf3 Setup"),
+	)
+
+	control := container.NewVBox(
+		widget.NewLabel("Server Port"), rp.portEntry,
 		rp.installBtn,
-		widget.NewLabel("iperf3 Server Port"),
-		rp.portEntry,
 		container.NewHBox(rp.startSrvBtn, rp.stopSrvBtn),
+	)
+
+	accordion := widget.NewAccordion(
+		widget.NewAccordionItem("SSH Connection", connection),
+		widget.NewAccordionItem("Remote Server", control),
+	)
+	accordion.Open(0)
+
+	rp.container = container.NewVBox(
+		accordion,
 		rp.statusEntry,
 	)
 
@@ -166,10 +171,7 @@ func (rp *RemotePanel) RestartServer() error {
 		return fmt.Errorf("not connected via SSH")
 	}
 
-	port := 5201
-	if v := rp.portEntry.Text; v != "" {
-		fmt.Sscanf(v, "%d", &port)
-	}
+	port := rp.getPort()
 
 	if err := rp.srvMgr.RestartServer(rp.client, port); err != nil {
 		return err
@@ -186,6 +188,11 @@ func (rp *RemotePanel) RestartServer() error {
 // IsConnected returns whether an SSH connection is active.
 func (rp *RemotePanel) IsConnected() bool {
 	return rp.client != nil
+}
+
+// getPort returns the configured iperf3 server port, or 5201 if invalid.
+func (rp *RemotePanel) getPort() int {
+	return parsePort(rp.portEntry.Text, 5201)
 }
 
 func (rp *RemotePanel) onDisconnect() {
@@ -206,10 +213,7 @@ func (rp *RemotePanel) onStartServer() {
 		return
 	}
 
-	port := 5201
-	if v := rp.portEntry.Text; v != "" {
-		fmt.Sscanf(v, "%d", &port)
-	}
+	port := rp.getPort()
 
 	if err := rp.srvMgr.StartServer(rp.client, port); err != nil {
 		rp.statusEntry.SetText(fmt.Sprintf("Error: %v", err))

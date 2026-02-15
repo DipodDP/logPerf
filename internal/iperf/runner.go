@@ -18,13 +18,28 @@ import (
 
 // Runner executes iperf3 commands.
 type Runner struct {
-	mu  sync.Mutex
-	cmd *exec.Cmd
+	mu                   sync.Mutex
+	cmd                  *exec.Cmd
+	supportsCongestion   bool
+	checkedCongestion    bool
+	congestionCheckMutex sync.Mutex
 }
 
 // NewRunner creates a new Runner.
 func NewRunner() *Runner {
 	return &Runner{}
+}
+
+// checkCongestionSupport checks once if iperf3 supports -C flag and caches the result.
+func (r *Runner) checkCongestionSupport(binaryPath string) bool {
+	r.congestionCheckMutex.Lock()
+	defer r.congestionCheckMutex.Unlock()
+
+	if !r.checkedCongestion {
+		r.supportsCongestion = SupportsCongestionControl(binaryPath)
+		r.checkedCongestion = true
+	}
+	return r.supportsCongestion
 }
 
 // Stop sends SIGTERM to the running iperf3 process, allowing it to finish
@@ -56,7 +71,8 @@ func (r *Runner) Run(_ context.Context, cfg IperfConfig) ([]byte, error) {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	args := cfg.ToArgs()
+	supportsCongestion := r.checkCongestionSupport(cfg.BinaryPath)
+	args := cfg.ToArgs(supportsCongestion)
 	args = append(args, "-J")
 
 	cmd := exec.Command(cfg.BinaryPath, args...)
@@ -87,7 +103,8 @@ func (r *Runner) RunWithPipe(_ context.Context, cfg IperfConfig, onLine func(str
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	args := cfg.ToArgs()
+	supportsCongestion := r.checkCongestionSupport(cfg.BinaryPath)
+	args := cfg.ToArgs(supportsCongestion)
 	args = append(args, "-J")
 
 	cmd := exec.Command(cfg.BinaryPath, args...)
@@ -155,6 +172,18 @@ func CheckVersion(binaryPath string) (string, error) {
 	return version, nil
 }
 
+// SupportsCongestionControl tests if iperf3 supports the -C flag.
+// This is platform-dependent (e.g., not supported on macOS).
+func SupportsCongestionControl(binaryPath string) bool {
+	cmd := exec.Command(binaryPath, "--help")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	// Check if help output mentions -C flag
+	return bytes.Contains(out, []byte("-C, --congestion"))
+}
+
 func versionAtLeast(have, want string) bool {
 	haveParts := strings.SplitN(have, ".", 2)
 	wantParts := strings.SplitN(want, ".", 2)
@@ -179,7 +208,8 @@ func (r *Runner) RunWithIntervals(_ context.Context, cfg IperfConfig, onInterval
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	args := cfg.ToArgs()
+	supportsCongestion := r.checkCongestionSupport(cfg.BinaryPath)
+	args := cfg.ToArgs(supportsCongestion)
 	args = append(args, "--json-stream", "--forceflush")
 
 	cmd := exec.Command(cfg.BinaryPath, args...)
