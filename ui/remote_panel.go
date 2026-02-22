@@ -190,6 +190,11 @@ func (rp *RemotePanel) IsConnected() bool {
 	return rp.client != nil
 }
 
+// Host returns the configured SSH host address.
+func (rp *RemotePanel) Host() string {
+	return rp.hostEntry.Text
+}
+
 // getPort returns the configured iperf3 server port, or 5201 if invalid.
 func (rp *RemotePanel) getPort() int {
 	return parsePort(rp.portEntry.Text, 5201)

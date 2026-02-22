@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"iperf-tool/internal/iperf"
 )
 
 // ParseFlags parses command-line arguments and returns a RunnerConfig.
@@ -31,8 +33,8 @@ func ParseFlags() (*RunnerConfig, error) {
 	fs := flag.NewFlagSet("iperf-tool", flag.ContinueOnError)
 
 	// Local test flags
-	fs.StringVar(&cfg.ServerAddr, "c", "", "Server address (required for local test)")
-	fs.StringVar(&cfg.ServerAddr, "connect", "", "Server address (required for local test)")
+	fs.StringVar(&cfg.ServerAddr, "s", "", "Server address (required for local test)")
+	fs.StringVar(&cfg.ServerAddr, "server", "", "Server address (required for local test)")
 	fs.IntVar(&cfg.Port, "p", cfg.Port, "Server port")
 	fs.IntVar(&cfg.Port, "port", cfg.Port, "Server port")
 	fs.IntVar(&cfg.Parallel, "P", cfg.Parallel, "Parallel streams")
@@ -42,6 +44,7 @@ func ParseFlags() (*RunnerConfig, error) {
 	fs.IntVar(&cfg.Interval, "i", cfg.Interval, "Reporting interval in seconds")
 	fs.IntVar(&cfg.Interval, "interval", cfg.Interval, "Reporting interval in seconds")
 	fs.StringVar(&cfg.Protocol, "u", cfg.Protocol, "UDP mode (use 'udp', default 'tcp')")
+	fs.StringVar(&cfg.Protocol, "protocol", cfg.Protocol, "Protocol (tcp or udp, default 'tcp')")
 	fs.IntVar(&cfg.BlockSize, "l", 0, "Block size (buffer/datagram size in bytes)")
 	fs.IntVar(&cfg.BlockSize, "block-size", 0, "Block size (buffer/datagram size in bytes)")
 	fs.BoolVar(&cfg.MeasurePing, "ping", false, "Measure latency before and during test")
@@ -65,10 +68,11 @@ func ParseFlags() (*RunnerConfig, error) {
 	fs.BoolVar(&cfg.InstallIperf, "install", false, "Install iperf3 on remote host")
 
 	// Output flags
-	fs.StringVar(&cfg.OutputCSV, "o", "", "Output CSV file")
-	fs.StringVar(&cfg.OutputCSV, "output", "", "Output CSV file")
+	fs.StringVar(&cfg.OutputCSV, "o", "", "Output base path (default: results/results); date suffix added automatically")
+	fs.StringVar(&cfg.OutputCSV, "output", "", "Output base path (default: results/results); date suffix added automatically")
 	fs.BoolVar(&cfg.Verbose, "v", false, "Verbose output")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "Verbose output")
+	fs.BoolVar(&cfg.Debug, "debug", false, fmt.Sprintf("Log raw iperf3 stream output to %s", iperf.DebugLogPath))
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return nil, err
@@ -83,7 +87,7 @@ func ParseFlags() (*RunnerConfig, error) {
 
 	// Validate: must have either server address or SSH host
 	if cfg.ServerAddr == "" && cfg.SSHHost == "" {
-		fmt.Fprintf(os.Stderr, "Error: must provide -c <server> for local test or -ssh <host> for remote server\n\n")
+		fmt.Fprintf(os.Stderr, "Error: must provide -s <server> for local test or -ssh <host> for remote server\n\n")
 		PrintUsage()
 		return nil, fmt.Errorf("missing required flags")
 	}
@@ -99,52 +103,53 @@ Usage: iperf-tool [flags]
        iperf-tool help    (show this message)
 
 LOCAL TEST MODE:
-  -c, -connect <addr>      Server address to test (required for local test)
-  -p, -port <num>          Server port (default: 5201)
-  -P, -parallel <num>      Parallel streams (default: 1)
-  -t, -time <sec>          Test duration in seconds (default: 10)
-  -i, -interval <sec>      Reporting interval (default: 1)
-  -u <udp|tcp>             Protocol mode (default: tcp)
-  -l, -block-size <bytes>  Block size / buffer length (default: iperf3 default)
-  -R, -reverse             Reverse mode (server sends, client receives)
+  -s, --server <addr>      Server address to test (required for local test)
+  -p, --port <num>         Server port (default: 5201)
+  -P, --parallel <num>     Parallel streams (default: 1)
+  -t, --time <sec>         Test duration in seconds (default: 10)
+  -i, --interval <sec>     Reporting interval (default: 1)
+  -u, --protocol <tcp|udp> Protocol mode (default: tcp)
+  -l, --block-size <bytes> Block size / buffer length (default: iperf3 default)
+  -R, --reverse            Reverse mode (server sends, client receives)
   --bidir                  Bidirectional mode (simultaneous both directions)
-  -b, -bandwidth <rate>    Target bandwidth (e.g. 100M, 1G; empty = unlimited)
-  -C, -congestion <algo>   TCP congestion algorithm (e.g. bbr, cubic)
+  -b, --bandwidth <rate>   Target bandwidth (e.g. 100M, 1G; empty = unlimited)
+  -C, --congestion <algo>  TCP congestion algorithm (e.g. bbr, cubic)
   --ping                   Measure latency before and during test
-  -binary <path>           Path to iperf3 binary (default: iperf3)
+  --binary <path>          Path to iperf3 binary (default: iperf3)
 
 REMOTE SERVER MODE:
-  -ssh <host>              SSH host to manage remote iperf3 server
-  -user <name>             SSH username (default: $USER)
-  -key <path>              SSH private key path
-  -password <pwd>          SSH password (insecure, prefer -key)
-  -ssh-port <num>          SSH port (default: 22)
-  -install                 Install iperf3 on remote host
-  -start-server            Start remote iperf3 server
-  -stop-server             Stop remote iperf3 server
+  --ssh <host>             SSH host to manage remote iperf3 server
+  --user <name>            SSH username (default: $USER)
+  --key <path>             SSH private key path
+  --password <pwd>         SSH password (insecure, prefer --key)
+  --ssh-port <num>         SSH port (default: 22)
+  --install                Install iperf3 on remote host
+  --start-server           Start remote iperf3 server
+  --stop-server            Stop remote iperf3 server
 
 OUTPUT:
-  -o, -output <file>       Save results to CSV file
-  -v, -verbose             Verbose output
+  -o, --output <path>      Output base path (default: results/results); date appended automatically
+  -v, --verbose            Verbose output
+  --debug                  Log raw iperf3 stream to /tmp/iperf-debug.log (GUI: set IPERF_DEBUG=1)
 
 EXAMPLES:
   # Run local test to server
-  iperf-tool -c 192.168.1.1 -t 30 -P 4 -o results.csv
+  iperf-tool -s 192.168.1.1 -t 30 -P 4 -o results.csv
 
   # Run test with verbose output
-  iperf-tool -c server.example.com -t 60 -v
+  iperf-tool -s server.example.com -t 60 -v
 
   # Test via UDP
-  iperf-tool -c 10.0.0.1 -u udp -t 20
+  iperf-tool -s 10.0.0.1 -u udp -t 20
 
   # Install iperf3 on remote server and start it
-  iperf-tool -ssh remote.host -user ubuntu -key ~/.ssh/id_rsa -install -start-server
+  iperf-tool --ssh remote.host --user ubuntu --key ~/.ssh/id_rsa --install --start-server
 
   # Run local test against remote server
-  iperf-tool -ssh remote.host -user ubuntu -key ~/.ssh/id_rsa -start-server -c remote.host -t 30
+  iperf-tool --ssh remote.host --user ubuntu --key ~/.ssh/id_rsa --start-server -s remote.host -t 30
 
   # Stop remote server
-  iperf-tool -ssh remote.host -user ubuntu -key ~/.ssh/id_rsa -stop-server
+  iperf-tool --ssh remote.host --user ubuntu --key ~/.ssh/id_rsa --stop-server
 
 `)
 }

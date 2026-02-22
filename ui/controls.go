@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image/color"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"iperf-tool/internal/format"
 	"iperf-tool/internal/iperf"
 	"iperf-tool/internal/model"
+	"iperf-tool/internal/netutil"
 	"iperf-tool/internal/ping"
 )
 
@@ -45,13 +47,19 @@ type Controls struct {
 }
 
 // NewControls creates the control buttons wired to the given views.
+// Set IPERF_DEBUG=1 in the environment to enable raw stream logging to
+// /tmp/iperf-debug.log.
 func NewControls(cf *ConfigForm, ov *OutputView, sfl *SavedFilesList, rp *RemotePanel) *Controls {
+	runner := iperf.NewRunner()
+	if os.Getenv("IPERF_DEBUG") == "1" {
+		runner = iperf.NewDebugRunner()
+	}
 	c := &Controls{
 		configForm:     cf,
 		outputView:     ov,
 		savedFilesList: sfl,
 		remotePanel:    rp,
-		runner:         iperf.NewRunner(),
+		runner:         runner,
 	}
 
 	white := color.White
@@ -137,7 +145,7 @@ func (c *Controls) onStart() {
 			}()
 		}
 
-		_, versionErr := iperf.CheckVersion(cfg.BinaryPath)
+		iperfVersion, versionErr := iperf.CheckVersion(cfg.BinaryPath)
 		useStream := versionErr == nil
 
 		// Check congestion control support
@@ -149,73 +157,77 @@ func (c *Controls) onStart() {
 		result, err := c.runTest(cfg, useStream)
 
 		// If the server is busy and we have an SSH connection, restart and retry once.
-		if err != nil && isServerBusy(err) && c.remotePanel.IsConnected() {
-			c.outputView.AppendLine("Server is busy, restarting remote iperf3...")
-			if restartErr := c.remotePanel.RestartServer(); restartErr != nil {
-				c.outputView.AppendLine(fmt.Sprintf("Restart failed: %v", restartErr))
+		if err != nil && isServerBusy(err) {
+			if c.remotePanel.IsConnected() {
+				c.outputView.AppendLine("Server is busy, restarting remote iperf3...")
+				if restartErr := c.remotePanel.RestartServer(); restartErr != nil {
+					c.outputView.AppendLine(fmt.Sprintf("Restart failed: %v", restartErr))
+				} else {
+					c.outputView.AppendLine("Server restarted, retrying test...")
+					time.Sleep(time.Second)
+					result, err = c.runTest(cfg, useStream)
+				}
 			} else {
-				c.outputView.AppendLine("Server restarted, retrying test...")
-				time.Sleep(time.Second)
-				result, err = c.runTest(cfg, useStream)
+				c.outputView.AppendLine("Tip: connect via SSH in the Remote panel, then retry — the server will be restarted automatically.")
 			}
 		}
 
-		// Stop background ping and collect result
+		// Stop background ping and collect results
+		hostname, _ := os.Hostname()
+		localIP := netutil.OutboundIP()
+		var pingBaseline, pingLoaded *model.PingResult
 		if cfg.MeasurePing && pingCancel != nil {
 			pingCancel()
 			loaded := <-loadedCh
-			if result != nil {
-				if baseline != nil {
-					result.PingBaseline = &model.PingResult{
-						PacketsSent: baseline.PacketsSent,
-						PacketsRecv: baseline.PacketsRecv,
-						PacketLoss:  baseline.PacketLoss,
-						MinMs:       baseline.MinMs,
-						AvgMs:       baseline.AvgMs,
-						MaxMs:       baseline.MaxMs,
-					}
-				}
-				if loaded != nil {
-					result.PingLoaded = &model.PingResult{
-						PacketsSent: loaded.PacketsSent,
-						PacketsRecv: loaded.PacketsRecv,
-						PacketLoss:  loaded.PacketLoss,
-						MinMs:       loaded.MinMs,
-						AvgMs:       loaded.AvgMs,
-						MaxMs:       loaded.MaxMs,
-					}
-				}
-			}
-		}
-
-		// Set config echo fields on the result
-		if result != nil {
-			if cfg.Reverse {
-				result.Direction = "Reverse"
-			} else if cfg.Bidir {
-				result.Direction = "Bidirectional"
-			}
-			result.Bandwidth = cfg.Bandwidth
-			// Only set congestion if it was actually used (platform supports it)
-			if supportsCongestion {
-				result.Congestion = cfg.Congestion
-			}
+			pingBaseline = baseline.ToModel()
+			pingLoaded = loaded.ToModel()
 		}
 
 		if err != nil {
 			c.outputView.AppendLine(fmt.Sprintf("Error: %v", err))
 			errResult := model.TestResult{
-				Timestamp:  time.Now(),
-				ServerAddr: cfg.ServerAddr,
-				Port:       cfg.Port,
-				Protocol:   cfg.Protocol,
-				Duration:   cfg.Duration,
-				Parallel:   cfg.Parallel,
-				Error:      err.Error(),
+				Timestamp:     time.Now(),
+				ServerAddr:    cfg.ServerAddr,
+				Port:          cfg.Port,
+				Protocol:      cfg.Protocol,
+				Duration:      cfg.Duration,
+				Parallel:      cfg.Parallel,
+				BlockSize:     cfg.BlockSize,
+				Error:         err.Error(),
+				Mode:          "GUI",
+				LocalHostname: hostname,
+				LocalIP:       localIP,
+				IperfVersion:  iperfVersion,
+				PingBaseline:  pingBaseline,
+				PingLoaded:    pingLoaded,
 			}
+			if cfg.Bidir {
+				errResult.Direction = "Bidirectional"
+			} else if cfg.Reverse {
+				errResult.Direction = "Reverse"
+			}
+			errResult.MeasurementID = export.NextMeasurementID(errResult.Timestamp)
 			c.autoSave(&errResult)
 			return
 		}
+
+		// Set config echo fields on the successful result.
+		// Always override with config values — parsed values may be empty on
+		// partial runs (e.g. connection refused after start event).
+		cfg.ApplyToResult(result, "GUI")
+		// Only set congestion if it was actually used (platform supports it)
+		if supportsCongestion {
+			result.Congestion = cfg.Congestion
+		}
+		result.LocalHostname = hostname
+		result.LocalIP = localIP
+		result.IperfVersion = iperfVersion
+		result.PingBaseline = pingBaseline
+		result.PingLoaded = pingLoaded
+		if c.remotePanel.IsConnected() {
+			result.SSHRemoteHost = c.remotePanel.Host()
+		}
+		result.MeasurementID = export.NextMeasurementID(result.Timestamp)
 
 		if useStream {
 			c.outputView.AppendLine("")
@@ -232,10 +244,25 @@ func (c *Controls) onStart() {
 // runTest executes a single iperf3 test, printing live output along the way.
 func (c *Controls) runTest(cfg iperf.IperfConfig, useStream bool) (*model.TestResult, error) {
 	if useStream {
-		c.outputView.AppendLine(format.FormatIntervalHeader())
-		c.outputView.AppendLine(strings.Repeat("-", 60))
-		return c.runner.RunWithIntervals(nil, cfg, func(interval *model.IntervalResult) {
-			c.outputView.AppendLine(format.FormatInterval(interval))
+		isUDP := strings.EqualFold(cfg.Protocol, "udp")
+		var header string
+		if cfg.Bidir {
+			header = "Time      " + format.FormatBidirIntervalHeader(isUDP)
+		} else {
+			header = "Time      " + format.FormatIntervalHeader(isUDP)
+		}
+		c.outputView.AppendLine("")
+		c.outputView.AppendLine("=== Client-Side Results ===")
+		c.outputView.AppendLine(header)
+		c.outputView.AppendLine(strings.Repeat("-", len(header)))
+		testStart := time.Now()
+		return c.runner.RunWithIntervals(nil, cfg, func(fwd, rev *model.IntervalResult) {
+			ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
+			if rev != nil {
+				c.outputView.AppendLine(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
+			} else {
+				c.outputView.AppendLine(ts + "  " + format.FormatInterval(fwd, isUDP))
+			}
 		})
 	}
 
@@ -260,14 +287,20 @@ func (c *Controls) onStop() {
 func (c *Controls) autoSave(result *model.TestResult) {
 	baseName := strings.TrimSuffix(c.fileNameEntry.Text, ".csv")
 	if baseName == "" {
-		baseName = "results"
+		baseName = "results/results"
 	}
 
-	csvPath := baseName + ".csv"
-	txtPath := baseName + ".txt"
-	intervalLogPath := baseName + "_log.csv"
+	if err := export.EnsureDir(baseName + ".csv"); err != nil {
+		c.outputView.AppendLine(fmt.Sprintf("Auto-save error (mkdir): %v", err))
+		return
+	}
 
-	if err := export.WriteCSV(csvPath, []model.TestResult{*result}); err != nil {
+	date := result.Timestamp
+	logPath := export.BuildLogPath(baseName, "_log", ".csv")
+	csvPath := export.BuildPath(baseName, "", ".csv", date)
+	txtPath := export.BuildPath(baseName, "", ".txt", date)
+
+	if err := export.WriteCSV(logPath, []model.TestResult{*result}); err != nil {
 		c.outputView.AppendLine(fmt.Sprintf("Auto-save CSV error: %v", err))
 	}
 
@@ -276,12 +309,12 @@ func (c *Controls) autoSave(result *model.TestResult) {
 	}
 
 	if len(result.Intervals) > 0 {
-		if err := export.WriteIntervalLog(intervalLogPath, result.Intervals); err != nil {
+		if err := export.WriteIntervalLog(csvPath, result); err != nil {
 			c.outputView.AppendLine(fmt.Sprintf("Auto-save interval log error: %v", err))
 		}
 	}
 
-	c.outputView.AppendLine(fmt.Sprintf("Results saved to %s, %s", csvPath, txtPath))
+	c.outputView.AppendLine(fmt.Sprintf("Results saved to %s, %s", logPath, txtPath))
 
 	// Refresh file list on UI thread
 	fyne.Do(func() {

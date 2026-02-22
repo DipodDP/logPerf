@@ -5,6 +5,9 @@ import (
 	"net"
 	"regexp"
 	"strconv"
+	"strings"
+
+	"iperf-tool/internal/model"
 )
 
 // IperfConfig holds the parameters for an iperf3 client run.
@@ -84,6 +87,110 @@ func (c *IperfConfig) Validate() error {
 	return nil
 }
 
+// parseBandwidthBits parses a bandwidth string (e.g. "50M", "500K", "1G", "100")
+// and returns the value in bits per second. Returns 0 on parse error.
+func parseBandwidthBits(bw string) float64 {
+	if bw == "" {
+		return 0
+	}
+	s := bw
+	mult := 1.0
+	switch s[len(s)-1] {
+	case 'K':
+		mult = 1_000
+		s = s[:len(s)-1]
+	case 'M':
+		mult = 1_000_000
+		s = s[:len(s)-1]
+	case 'G':
+		mult = 1_000_000_000
+		s = s[:len(s)-1]
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return v * mult
+}
+
+// BandwidthPerStreamMbps returns the per-stream target in Mbps
+// (total Bandwidth / number of parallel streams).
+// Returns 0 if Bandwidth is empty (unlimited).
+func (c *IperfConfig) BandwidthPerStreamMbps() float64 {
+	bits := parseBandwidthBits(c.Bandwidth)
+	if bits == 0 {
+		return 0
+	}
+	streams := float64(c.Parallel)
+	if streams < 1 {
+		streams = 1
+	}
+	return bits / streams / 1_000_000
+}
+
+const (
+	// DefaultUDPBlockSize is the iperf3 default datagram size for UDP tests (bytes).
+	DefaultUDPBlockSize = 1460
+	// DefaultTCPBlockSize is the iperf3 default send buffer size for TCP tests (bytes).
+	DefaultTCPBlockSize = 131072
+)
+
+// ApplyToResult sets result fields from cfg, using config values as authoritative
+// overrides (handles partial runs where parsed values may be empty).
+// mode should be "CLI" or "GUI".
+func (c *IperfConfig) ApplyToResult(result *model.TestResult, mode string) {
+	if c.ServerAddr != "" {
+		result.ServerAddr = c.ServerAddr
+	}
+	if c.Port != 0 {
+		result.Port = c.Port
+	}
+	if c.Protocol != "" {
+		result.Protocol = strings.ToUpper(c.Protocol)
+	}
+	if c.Duration != 0 {
+		result.Duration = c.Duration
+	}
+	if c.Parallel != 0 {
+		result.Parallel = c.Parallel
+	}
+	isUDP := strings.EqualFold(c.Protocol, "udp")
+	switch {
+	case c.BlockSize > 0:
+		result.BlockSize = c.BlockSize
+	case isUDP:
+		result.BlockSize = DefaultUDPBlockSize
+	default:
+		result.BlockSize = DefaultTCPBlockSize
+	}
+	if c.Reverse {
+		result.Direction = "Reverse"
+	} else if c.Bidir {
+		result.Direction = "Bidirectional"
+	}
+	if bw := c.BandwidthPerStreamMbps(); bw > 0 {
+		result.Bandwidth = fmt.Sprintf("%.2f", bw)
+	} else if isUDP {
+		udpDefault := IperfConfig{Bandwidth: "1M", Parallel: c.Parallel}
+		result.Bandwidth = fmt.Sprintf("%.2f", udpDefault.BandwidthPerStreamMbps())
+	}
+	result.Mode = mode
+}
+
+// bandwidthPerStreamArg returns the per-stream bandwidth as an iperf3 -b
+// argument string (integer bits/sec). Returns "" if Bandwidth is empty.
+func (c *IperfConfig) bandwidthPerStreamArg() string {
+	bits := parseBandwidthBits(c.Bandwidth)
+	if bits == 0 {
+		return ""
+	}
+	streams := float64(c.Parallel)
+	if streams < 1 {
+		streams = 1
+	}
+	return strconv.FormatInt(int64(bits/streams), 10)
+}
+
 // ToArgs converts the config into iperf3 CLI arguments.
 // The -J flag (JSON output) is NOT included here — the runner adds it.
 // If supportsCongestion is false, the -C flag will be skipped even if Congestion is set.
@@ -107,11 +214,12 @@ func (c *IperfConfig) ToArgs(supportsCongestion bool) []string {
 	if c.Bidir {
 		args = append(args, "--bidir")
 	}
-	if c.Bandwidth != "" {
-		args = append(args, "-b", c.Bandwidth)
+	if bwArg := c.bandwidthPerStreamArg(); bwArg != "" {
+		args = append(args, "-b", bwArg)
 	}
 	if c.Congestion != "" && supportsCongestion {
 		args = append(args, "-C", c.Congestion)
 	}
+	args = append(args, "--get-server-output")
 	return args
 }

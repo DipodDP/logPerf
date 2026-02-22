@@ -206,9 +206,12 @@ func TestParseStreamEventMissingEvent(t *testing.T) {
 
 func TestParseIntervalData(t *testing.T) {
 	ev, _ := ParseStreamEvent([]byte(sampleIntervalEvent))
-	interval, err := ParseIntervalData(ev.Data)
+	interval, rev, err := ParseIntervalData(ev.Data)
 	if err != nil {
 		t.Fatalf("ParseIntervalData() error: %v", err)
+	}
+	if rev != nil {
+		t.Error("rev should be nil for non-bidir interval")
 	}
 	if interval.TimeStart != 0 {
 		t.Errorf("TimeStart = %f, want 0", interval.TimeStart)
@@ -309,7 +312,7 @@ const sampleUDPJSON = `{
 			"seconds": 3.0,
 			"bytes": 393216,
 			"bits_per_second": 1048576.0,
-			"jitter_ms": 0.025,
+			"jitter_ms": 0,
 			"lost_packets": 3,
 			"packets": 48,
 			"lost_percent": 6.25,
@@ -321,6 +324,7 @@ const sampleUDPJSON = `{
 			"seconds": 3.0,
 			"bytes": 368640,
 			"bits_per_second": 983040.0,
+			"jitter_ms": 0.025,
 			"sender": false
 		},
 		"streams": [
@@ -392,7 +396,7 @@ func TestParseResultUDP(t *testing.T) {
 	}
 }
 
-const sampleUDPEndEvent = `{"event":"end","data":{"sum_sent":{"start":0,"end":3,"seconds":3,"bytes":393216,"bits_per_second":1048576,"jitter_ms":0.025,"lost_packets":3,"packets":48,"lost_percent":6.25,"sender":true},"sum_received":{"start":0,"end":3,"seconds":3,"bytes":368640,"bits_per_second":983040,"sender":false},"streams":[{"udp":{"socket":5,"bits_per_second":1048576,"jitter_ms":0.025,"lost_packets":3,"packets":48,"lost_percent":6.25}}]}}`
+const sampleUDPEndEvent = `{"event":"end","data":{"sum_sent":{"start":0,"end":3,"seconds":3,"bytes":393216,"bits_per_second":1048576,"jitter_ms":0,"lost_packets":3,"packets":48,"lost_percent":6.25,"sender":true},"sum_received":{"start":0,"end":3,"seconds":3,"bytes":368640,"bits_per_second":983040,"jitter_ms":0.025,"sender":false},"streams":[{"udp":{"socket":5,"bits_per_second":1048576,"jitter_ms":0.025,"lost_packets":3,"packets":48,"lost_percent":6.25}}]}}`
 
 func TestParseEndDataUDP(t *testing.T) {
 	ev, _ := ParseStreamEvent([]byte(sampleUDPEndEvent))
@@ -610,11 +614,68 @@ func TestParseEndDataBidirStreamFallback(t *testing.T) {
 
 func TestParseIntervalDataOmitted(t *testing.T) {
 	data := `{"streams":[],"sum":{"start":0,"end":1,"seconds":1,"bytes":0,"bits_per_second":0,"retransmits":0,"omitted":true}}`
-	interval, err := ParseIntervalData([]byte(data))
+	interval, _, err := ParseIntervalData([]byte(data))
 	if err != nil {
 		t.Fatalf("ParseIntervalData() error: %v", err)
 	}
 	if !interval.Omitted {
 		t.Error("Omitted should be true")
+	}
+}
+
+func TestParseIntervalDataBidir(t *testing.T) {
+	data := `{"streams":[{"socket":5,"start":0,"end":1,"bytes":100000000,"bits_per_second":800000000,"sender":true},{"socket":7,"start":0,"end":1,"bytes":50000000,"bits_per_second":400000000,"sender":false}],"sum":{"start":0,"end":1,"bytes":100000000,"bits_per_second":800000000,"omitted":false,"sender":true},"sum_bidir_reverse":{"start":0,"end":1,"bytes":50000000,"bits_per_second":400000000,"omitted":false,"sender":false}}`
+	fwd, rev, err := ParseIntervalData([]byte(data))
+	if err != nil {
+		t.Fatalf("ParseIntervalData() error: %v", err)
+	}
+	if math.Abs(fwd.BandwidthBps-800000000) > 1 {
+		t.Errorf("fwd BandwidthBps = %f, want 800000000", fwd.BandwidthBps)
+	}
+	if rev == nil {
+		t.Fatal("rev should not be nil for bidir interval")
+	}
+	if math.Abs(rev.BandwidthBps-400000000) > 1 {
+		t.Errorf("rev BandwidthBps = %f, want 400000000", rev.BandwidthBps)
+	}
+	if rev.Bytes != 50000000 {
+		t.Errorf("rev Bytes = %d, want 50000000", rev.Bytes)
+	}
+}
+
+func TestParseServerOutputText_SingleStreamTCPBidir(t *testing.T) {
+	// Single-stream bidir TCP: server output has no [SUM] line, only a per-stream [N][RX-S] line.
+	serverText := `Accepted connection from 192.168.1.100, port 43210
+[  5] local 192.168.1.1 port 5201 connected to 192.168.1.100 port 43210
+[ ID][Role] Interval           Transfer     Bitrate         Retr  Cwnd
+[  5][TX-S]   0.00-10.04  sec   212 MBytes   177 Mbits/sec    0   2.06 MBytes
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID][Role] Interval           Transfer     Bitrate
+[  5][RX-S]  0.00-10.04  sec  101 MBytes   84.7 Mbits/sec                  receiver
+- - - - - - - - - - - - - - - - - - - - - - - - -
+iperf Done.`
+
+	r := &model.TestResult{Protocol: "TCP"}
+	ParseServerOutputText(serverText, r, true)
+
+	want := 84.7e6
+	if math.Abs(r.FwdReceivedBps-want) > 1e3 {
+		t.Errorf("FwdReceivedBps = %f, want %f (per-stream fallback)", r.FwdReceivedBps, want)
+	}
+}
+
+func TestParseServerOutputText_MultiStreamTCPBidir(t *testing.T) {
+	// Multi-stream bidir TCP: server output has a [SUM][RX-S] line; per-stream lines must be ignored.
+	serverText := `[ ID][Role] Interval           Transfer     Bitrate
+[  5][RX-S]  0.00-10.00  sec  50 MBytes   42.0 Mbits/sec                  receiver
+[  7][RX-S]  0.00-10.00  sec  50 MBytes   42.0 Mbits/sec                  receiver
+[SUM][RX-S]  0.00-10.00  sec  100 MBytes  85.0 Mbits/sec                  receiver`
+
+	r := &model.TestResult{Protocol: "TCP"}
+	ParseServerOutputText(serverText, r, true)
+
+	want := 85.0e6
+	if math.Abs(r.FwdReceivedBps-want) > 1e3 {
+		t.Errorf("FwdReceivedBps = %f, want %f (SUM line)", r.FwdReceivedBps, want)
 	}
 }

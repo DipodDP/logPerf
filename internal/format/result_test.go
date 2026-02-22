@@ -105,12 +105,20 @@ func TestFormatResultMismatchWarning(t *testing.T) {
 }
 
 func TestFormatIntervalHeader(t *testing.T) {
-	header := FormatIntervalHeader()
-	if !strings.Contains(header, "Interval") {
-		t.Error("header should contain 'Interval'")
+	header := FormatIntervalHeader(false)
+	if strings.Contains(header, "Interval") {
+		t.Error("header should not contain 'Interval' range column")
 	}
 	if !strings.Contains(header, "Bandwidth") {
 		t.Error("header should contain 'Bandwidth'")
+	}
+
+	udpHeader := FormatIntervalHeader(true)
+	if !strings.Contains(udpHeader, "Mbps") {
+		t.Error("UDP header should contain 'Mbps'")
+	}
+	if strings.Contains(udpHeader, "Retransmits") {
+		t.Error("UDP header should not contain 'Retransmits'")
 	}
 }
 
@@ -124,19 +132,46 @@ func TestFormatInterval(t *testing.T) {
 		Omitted:      false,
 	}
 
-	out := FormatInterval(interval)
+	out := FormatInterval(interval, false)
 
-	if !strings.Contains(out, "0.0") {
-		t.Error("should contain start time")
-	}
-	if !strings.Contains(out, "1.0 sec") {
-		t.Error("should contain end time")
+	if strings.Contains(out, "0.0") && strings.Contains(out, "sec") {
+		t.Error("should not contain interval range [X.X-Y.Y sec]")
 	}
 	if !strings.Contains(out, "940.00 Mbps") {
 		t.Errorf("should contain bandwidth, got: %s", out)
 	}
 	if !strings.Contains(out, "3 retransmits") {
 		t.Error("should contain retransmits")
+	}
+}
+
+func TestFormatIntervalUDP(t *testing.T) {
+	interval := &model.IntervalResult{
+		TimeStart:    0,
+		TimeEnd:      1,
+		Bytes:        125000,
+		BandwidthBps: 1_000_000,
+		Packets:      50,
+		LostPackets:  2,
+		JitterMs:     0.123,
+	}
+
+	out := FormatInterval(interval, true)
+
+	if !strings.Contains(out, "1.00 Mbps") {
+		t.Errorf("should contain bandwidth, got: %s", out)
+	}
+	if !strings.Contains(out, "50 pkts") {
+		t.Error("should contain packet count")
+	}
+	if strings.Contains(out, "lost") {
+		t.Error("UDP interval should not show lost count")
+	}
+	if strings.Contains(out, "0.123 ms") {
+		t.Error("UDP interval should not show jitter")
+	}
+	if strings.Contains(out, "retransmits") {
+		t.Error("UDP interval should not mention retransmits")
 	}
 }
 
@@ -419,10 +454,10 @@ func TestFormatResultBidir(t *testing.T) {
 	out := FormatResult(r)
 
 	// Per-stream labels
-	if !strings.Contains(out, "Stream 1 [TX]:") {
+	if !strings.Contains(out, "Stream 1 [Fwd]:") {
 		t.Error("missing TX label for stream 1")
 	}
-	if !strings.Contains(out, "Stream 3 [RX]:") {
+	if !strings.Contains(out, "Stream 3 [Rev]:") {
 		t.Error("missing RX label for stream 3")
 	}
 
@@ -436,8 +471,9 @@ func TestFormatResultBidir(t *testing.T) {
 	if !strings.Contains(out, "400.00 Mbps") {
 		t.Error("missing forward sent Mbps")
 	}
-	if !strings.Contains(out, "480.00 Mbps") {
-		t.Error("missing reverse sent Mbps")
+	// ReverseActualMbps prefers ReverseReceivedBps (472) over ReverseSentBps (480)
+	if !strings.Contains(out, "472.00 Mbps") {
+		t.Error("missing reverse actual Mbps")
 	}
 	if !strings.Contains(out, "(retransmits: 2)") {
 		t.Error("missing forward retransmits")
@@ -445,14 +481,13 @@ func TestFormatResultBidir(t *testing.T) {
 	if !strings.Contains(out, "(retransmits: 5)") {
 		t.Error("missing reverse retransmits")
 	}
-	if !strings.Contains(out, "Transferred:") {
-		t.Error("missing Transferred line")
+	// BytesSent=500MB, BytesReceived=495MB → C→S full line
+	if !strings.Contains(out, "C→S transferred: 500.00 MB sent / 495.00 MB received") {
+		t.Errorf("missing C→S transferred line, got:\n%s", out)
 	}
-	if !strings.Contains(out, "500.00 MB sent") {
-		t.Error("missing sent MB")
-	}
-	if !strings.Contains(out, "590.00 MB received") {
-		t.Error("missing reverse received MB")
+	// ReverseBytesSent=600MB, ReverseBytesReceived=590MB → S→C full line
+	if !strings.Contains(out, "S→C transferred: 600.00 MB sent / 590.00 MB received") {
+		t.Errorf("missing S→C transferred line, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Direction:       Bidirectional") {
 		t.Error("missing direction line")
@@ -466,37 +501,86 @@ func TestFormatResultBidir(t *testing.T) {
 func TestFormatResultBidirStreamModeFallback(t *testing.T) {
 	// In --json-stream bidir mode, sum_sent_bidir_reverse may be absent.
 	// The format should fall back to ReceivedBps for the Receive summary.
+	// Simulates SIGTERM in --json-stream bidir mode: sum_sent_bidir_reverse.bytes=0
+	// but sum_received_bidir_reverse.bytes has the real count.
 	r := &model.TestResult{
-		Timestamp:     time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
-		ServerAddr:    "192.168.1.1",
-		Port:          5201,
-		Protocol:      "TCP",
-		Parallel:      4,
-		Duration:      10,
-		Direction:     "Bidirectional",
-		SentBps:       400_000_000,
-		ReceivedBps:   480_000_000, // fallback for reverse
-		Retransmits:   2,
-		BytesSent:     500_000_000,
-		BytesReceived: 600_000_000, // fallback for reverse bytes
-		// Reverse fields are 0 (not present in --json-stream end event)
+		Timestamp:            time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
+		ServerAddr:           "192.168.1.1",
+		Port:                 5201,
+		Protocol:             "TCP",
+		Parallel:             4,
+		Duration:             10,
+		Direction:            "Bidirectional",
+		SentBps:              400_000_000,
+		ReceivedBps:          0,
+		Retransmits:          2,
+		BytesSent:            500_000_000,
+		BytesReceived:        0,
+		ReverseSentBps:       480_000_000,
+		ReverseBytesSent:     0,                // zeroed by iperf3 on SIGTERM
+		ReverseBytesReceived: 600_000_000,      // receiver side has the real count
 		Streams: []model.StreamResult{
 			{ID: 1, SentBps: 200_000_000, Sender: true},
 			{ID: 2, SentBps: 200_000_000, Sender: true},
-			{ID: 3, Sender: false}, // 0 bps — no per-stream data in --json-stream
+			{ID: 3, Sender: false},
 			{ID: 4, Sender: false},
 		},
 	}
 
 	out := FormatResult(r)
 
-	// Receive line should show the fallback ReceivedBps
+	// Receive line should show ReverseSentBps
 	if !strings.Contains(out, "Receive:         480.00 Mbps") {
-		t.Errorf("expected Receive fallback to ReceivedBps, got: %s", out)
+		t.Errorf("expected Receive to show ReverseSentBps, got: %s", out)
 	}
-	// Transferred should use BytesReceived as fallback
-	if !strings.Contains(out, "600.00 MB received") {
-		t.Errorf("expected fallback to BytesReceived, got: %s", out)
+	// ReverseBytesSent=0 → S→C line shows only received side (fallback to ReverseBytesReceived)
+	if !strings.Contains(out, "S→C transferred: 600.00 MB received") {
+		t.Errorf("expected S→C fallback to ReverseBytesReceived, got: %s", out)
+	}
+}
+
+func TestFormatResultBidirUDP(t *testing.T) {
+	r := &model.TestResult{
+		Timestamp:      time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
+		ServerAddr:     "192.168.1.1",
+		Port:           5201,
+		Protocol:       "UDP",
+		Parallel:       4,
+		Duration:       10,
+		Direction:      "Bidirectional",
+		SentBps:        4_000_000,
+		ReverseSentBps: 3_800_000,
+		Packets:        200,
+		LostPackets:    4,
+		LostPercent:    2.0,
+		JitterMs:       0.050,
+		Streams: []model.StreamResult{
+			{ID: 1, SentBps: 1_000_000, Packets: 50},
+			{ID: 2, SentBps: 1_000_000, Packets: 50},
+			{ID: 3, SentBps: 1_000_000, Packets: 50},
+			{ID: 4, SentBps: 1_000_000, Packets: 50},
+		},
+	}
+
+	out := FormatResult(r)
+
+	// Summary should not mention retransmits for UDP bidir
+	if strings.Contains(out, "retransmits") {
+		t.Error("UDP bidir summary should not mention retransmits")
+	}
+	// Per-stream section: all streams shown (UDP bidir uses [Fwd]/[Rev] prefix)
+	if !strings.Contains(out, "Stream 1 [") {
+		t.Error("missing Stream 1")
+	}
+	if !strings.Contains(out, "Stream 4 [") {
+		t.Error("missing Stream 4")
+	}
+	// Should show Client Send/Server Send bandwidth
+	if !strings.Contains(out, "Client Send:") {
+		t.Error("missing Client Send line")
+	}
+	if !strings.Contains(out, "Server Send:") {
+		t.Error("missing Server Send line")
 	}
 }
 

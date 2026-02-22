@@ -41,7 +41,7 @@ func TestParseFlags_LocalTest(t *testing.T) {
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 
-	os.Args = []string{"iperf-tool", "-c", "192.168.1.1", "-p", "5201", "-P", "4", "-t", "30"}
+	os.Args = []string{"iperf-tool", "-server", "192.168.1.1", "-p", "5201", "-P", "4", "-t", "30"}
 
 	cfg, err := ParseFlags()
 	if err != nil {
@@ -69,7 +69,7 @@ func TestParseFlags_UDP(t *testing.T) {
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 
-	os.Args = []string{"iperf-tool", "-c", "10.0.0.1", "-u", "udp"}
+	os.Args = []string{"iperf-tool", "-server", "10.0.0.1", "-u", "udp"}
 
 	cfg, err := ParseFlags()
 	if err != nil {
@@ -107,7 +107,7 @@ func TestParseFlags_ReverseFlag(t *testing.T) {
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 
-	os.Args = []string{"iperf-tool", "-c", "10.0.0.1", "-R"}
+	os.Args = []string{"iperf-tool", "-server", "10.0.0.1", "-R"}
 
 	cfg, err := ParseFlags()
 	if err != nil {
@@ -122,7 +122,7 @@ func TestParseFlags_BidirFlag(t *testing.T) {
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 
-	os.Args = []string{"iperf-tool", "-c", "10.0.0.1", "-bidir"}
+	os.Args = []string{"iperf-tool", "-server", "10.0.0.1", "-bidir"}
 
 	cfg, err := ParseFlags()
 	if err != nil {
@@ -137,7 +137,7 @@ func TestParseFlags_BandwidthFlag(t *testing.T) {
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 
-	os.Args = []string{"iperf-tool", "-c", "10.0.0.1", "-b", "100M"}
+	os.Args = []string{"iperf-tool", "-server", "10.0.0.1", "-b", "100M"}
 
 	cfg, err := ParseFlags()
 	if err != nil {
@@ -152,7 +152,7 @@ func TestParseFlags_CongestionFlag(t *testing.T) {
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 
-	os.Args = []string{"iperf-tool", "-c", "10.0.0.1", "-C", "bbr"}
+	os.Args = []string{"iperf-tool", "-server", "10.0.0.1", "-C", "bbr"}
 
 	cfg, err := ParseFlags()
 	if err != nil {

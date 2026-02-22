@@ -3,12 +3,15 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	"iperf-tool/internal/export"
 	"iperf-tool/internal/format"
 	"iperf-tool/internal/iperf"
 	"iperf-tool/internal/model"
+	"iperf-tool/internal/netutil"
 	"iperf-tool/internal/ping"
 	"iperf-tool/internal/ssh"
 )
@@ -43,6 +46,7 @@ type RunnerConfig struct {
 	// Output
 	OutputCSV string
 	Verbose   bool
+	Debug     bool
 }
 
 // LocalTestRunner runs a single iperf3 test locally and optionally saves results.
@@ -68,7 +72,12 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	runner := iperf.NewRunner()
+	var runner *iperf.Runner
+	if cfg.Debug {
+		runner = iperf.NewDebugRunner()
+	} else {
+		runner = iperf.NewRunner()
+	}
 	ctx := context.Background()
 
 	dirLabel := ""
@@ -113,86 +122,108 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 	}
 
 	// Run iperf test
-	result, err := runIperfTest(runner, iperfCfg, cfg)
+	result, iperfVersion, err := runIperfTest(runner, iperfCfg, cfg)
 
 	// Stop background ping and collect result
+	var pingBaseline, pingLoaded *model.PingResult
 	if cfg.MeasurePing && pingCancel != nil {
 		pingCancel()
 		loaded := <-loadedCh
-		if result != nil {
-			if baseline != nil {
-				result.PingBaseline = pingResultToModel(baseline)
-			}
-			if loaded != nil {
-				result.PingLoaded = pingResultToModel(loaded)
-			}
-		}
+		pingBaseline = baseline.ToModel()
+		pingLoaded = loaded.ToModel()
 	}
 
 	if err != nil {
 		return nil, err
 	}
 
-	// Set config echo fields on the result
-	if cfg.Reverse {
-		result.Direction = "Reverse"
-	} else if cfg.Bidir {
-		result.Direction = "Bidirectional"
-	}
-	result.Bandwidth = cfg.Bandwidth
+	result.PingBaseline = pingBaseline
+	result.PingLoaded = pingLoaded
+
+	// Set config echo fields on the result.
+	// Always override with config values — parsed values may be empty on
+	// partial runs (e.g. connection refused after start event).
+	iperfCfg.ApplyToResult(result, "CLI")
 	result.Congestion = cfg.Congestion
+	result.IperfVersion = iperfVersion
+	if h, herr := os.Hostname(); herr == nil {
+		result.LocalHostname = h
+	}
+	result.LocalIP = netutil.OutboundIP()
+	if cfg.SSHHost != "" {
+		result.SSHRemoteHost = cfg.SSHHost
+	}
+	result.MeasurementID = export.NextMeasurementID(result.Timestamp)
 
 	saveResults(result, cfg)
 	return result, nil
 }
 
-func pingResultToModel(p *ping.Result) *model.PingResult {
-	return &model.PingResult{
-		PacketsSent: p.PacketsSent,
-		PacketsRecv: p.PacketsRecv,
-		PacketLoss:  p.PacketLoss,
-		MinMs:       p.MinMs,
-		AvgMs:       p.AvgMs,
-		MaxMs:       p.MaxMs,
-	}
-}
-
-func runIperfTest(runner *iperf.Runner, iperfCfg iperf.IperfConfig, cfg RunnerConfig) (*model.TestResult, error) {
-	_, versionErr := iperf.CheckVersion(iperfCfg.BinaryPath)
+func runIperfTest(runner *iperf.Runner, iperfCfg iperf.IperfConfig, cfg RunnerConfig) (*model.TestResult, string, error) {
+	version, versionErr := iperf.CheckVersion(iperfCfg.BinaryPath)
 	if versionErr != nil {
 		fmt.Printf("Note: %v — falling back to standard JSON mode (no live intervals)\n", versionErr)
-		return runner.RunWithPipe(context.Background(), iperfCfg, func(line string) {
+		result, err := runner.RunWithPipe(context.Background(), iperfCfg, func(line string) {
 			if cfg.Verbose {
 				fmt.Println(line)
 			}
 		})
+		return result, version, err
 	}
 
-	fmt.Println(format.FormatIntervalHeader())
-	fmt.Println(strings.Repeat("-", 60))
+	isUDP := strings.EqualFold(iperfCfg.Protocol, "udp")
+	if iperfCfg.Bidir {
+		header := "Time      " + format.FormatBidirIntervalHeader(isUDP)
+		fmt.Println(header)
+		fmt.Println(strings.Repeat("-", len(header)))
+	} else {
+		header := "Time      " + format.FormatIntervalHeader(isUDP)
+		fmt.Println(header)
+		fmt.Println(strings.Repeat("-", len(header)))
+	}
 
-	return runner.RunWithIntervals(context.Background(), iperfCfg, func(interval *model.IntervalResult) {
-		fmt.Println(format.FormatInterval(interval))
+	testStart := time.Now()
+	result, err := runner.RunWithIntervals(context.Background(), iperfCfg, func(fwd, rev *model.IntervalResult) {
+		ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
+		if rev != nil {
+			fmt.Println(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
+		} else {
+			fmt.Println(ts + "  " + format.FormatInterval(fwd, isUDP))
+		}
 	})
+	return result, version, err
 }
 
 func saveResults(result *model.TestResult, cfg RunnerConfig) {
 	if cfg.OutputCSV == "" {
+		return // opt-in: only save when -o is specified
+	}
+
+	base := strings.TrimSuffix(cfg.OutputCSV, ".csv")
+
+	if err := export.EnsureDir(base + ".csv"); err != nil {
+		fmt.Printf("Cannot create output directory: %v\n", err)
 		return
 	}
-	if err := export.WriteCSV(cfg.OutputCSV, []model.TestResult{*result}); err != nil {
+
+	date := result.Timestamp
+	logPath := export.BuildLogPath(base, "_log", ".csv")
+	csvPath := export.BuildPath(base, "", ".csv", date)
+	txtPath := export.BuildPath(base, "", ".txt", date)
+
+	if err := export.WriteCSV(logPath, []model.TestResult{*result}); err != nil {
 		fmt.Printf("Save CSV error: %v\n", err)
 		return
 	}
-	logPath := strings.TrimSuffix(cfg.OutputCSV, ".csv") + "_log.csv"
+	if err := export.WriteTXT(txtPath, []model.TestResult{*result}); err != nil {
+		fmt.Printf("Save TXT error: %v\n", err)
+	}
 	if len(result.Intervals) > 0 {
-		if err := export.WriteIntervalLog(logPath, result.Intervals); err != nil {
+		if err := export.WriteIntervalLog(csvPath, result); err != nil {
 			fmt.Printf("Save interval log error: %v\n", err)
 		}
 	}
-	if cfg.Verbose {
-		fmt.Printf("Results saved to: %s\n", cfg.OutputCSV)
-	}
+	fmt.Printf("Results saved: %s, %s\n", logPath, txtPath)
 }
 
 // RemoteServerRunner manages a remote iperf3 server via SSH.

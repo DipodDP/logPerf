@@ -193,18 +193,38 @@ func TestToArgs_Bidir(t *testing.T) {
 }
 
 func TestToArgs_Bandwidth(t *testing.T) {
+	// 100M total / 1 stream = 100000000 bits/sec passed to iperf3
 	cfg := validConfig()
 	cfg.Bandwidth = "100M"
-	args := cfg.ToArgs(true) // assume congestion supported in tests
+	cfg.Parallel = 1
+	args := cfg.ToArgs(true)
 	found := false
 	for i, a := range args {
-		if a == "-b" && i+1 < len(args) && args[i+1] == "100M" {
+		if a == "-b" && i+1 < len(args) && args[i+1] == "100000000" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected -b 100M in args, got %v", args)
+		t.Errorf("expected -b 100000000 in args, got %v", args)
+	}
+}
+
+func TestToArgs_BandwidthDividedByStreams(t *testing.T) {
+	// 50M total / 4 streams = 12500000 bits/sec per stream
+	cfg := validConfig()
+	cfg.Bandwidth = "50M"
+	cfg.Parallel = 4
+	args := cfg.ToArgs(true)
+	found := false
+	for i, a := range args {
+		if a == "-b" && i+1 < len(args) && args[i+1] == "12500000" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected -b 12500000 in args, got %v", args)
 	}
 }
 

@@ -55,7 +55,7 @@ func TestToArgs(t *testing.T) {
 	cfg.Protocol = "tcp"
 
 	args := cfg.ToArgs(true) // assume congestion supported in tests
-	expected := []string{"-c", "10.0.0.1", "-p", "5201", "-P", "4", "-t", "10", "-i", "1"}
+	expected := []string{"-c", "10.0.0.1", "-p", "5201", "-P", "4", "-t", "10", "-i", "1", "--get-server-output"}
 	if len(args) != len(expected) {
 		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
 	}
