@@ -2,11 +2,13 @@ package ui
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 // SavedFilesList displays a list of saved result files from disk
 type SavedFilesList struct {
 	mu        sync.Mutex
+	dir       string
 	files     []FileInfo
 	list      *widget.List
 	container *fyne.Container
@@ -34,6 +37,7 @@ type FileInfo struct {
 // NewSavedFilesList creates a new saved files list component
 func NewSavedFilesList() *SavedFilesList {
 	sfl := &SavedFilesList{
+		dir:   "results",
 		files: []FileInfo{},
 	}
 
@@ -96,13 +100,23 @@ func (sfl *SavedFilesList) Container() *fyne.Container {
 	return sfl.container
 }
 
+// SetDir updates the directory to scan and refreshes the list.
+func (sfl *SavedFilesList) SetDir(dir string) {
+	sfl.mu.Lock()
+	sfl.dir = dir
+	sfl.mu.Unlock()
+	sfl.Refresh()
+}
+
 // Refresh rescans the directory and updates the file list
 func (sfl *SavedFilesList) Refresh() {
 	files, err := sfl.scanFiles()
-	if err != nil {
-		// Log error but don't crash
+	if err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error scanning files: %v\n", err)
 		return
+	}
+	if files == nil {
+		files = []FileInfo{}
 	}
 
 	sfl.mu.Lock()
@@ -112,36 +126,39 @@ func (sfl *SavedFilesList) Refresh() {
 	sfl.list.Refresh()
 }
 
-// scanFiles discovers result files in the working directory
+// scanFiles discovers all CSV and TXT result files under the configured directory (recursive).
 func (sfl *SavedFilesList) scanFiles() ([]FileInfo, error) {
+	sfl.mu.Lock()
+	dir := sfl.dir
+	sfl.mu.Unlock()
+
 	var files []FileInfo
 
-	// Find CSV files
-	csvFiles, err := filepath.Glob("*.csv")
-	if err != nil {
-		return nil, err
-	}
-
-	// Find TXT files
-	txtFiles, err := filepath.Glob("*.txt")
-	if err != nil {
-		return nil, err
-	}
-
-	// Combine and get file info
-	allFiles := append(csvFiles, txtFiles...)
-	for _, filename := range allFiles {
-		info, err := os.Stat(filename)
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			continue // Skip files we can't stat
+			return nil // skip unreadable entries
 		}
-
+		if d.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".csv" && ext != ".txt" {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
 		files = append(files, FileInfo{
-			Name:     filename,
-			Path:     filename,
+			Name:     path,
+			Path:     path,
 			Size:     info.Size(),
 			Modified: info.ModTime(),
 		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	// Sort by modified time (newest first)

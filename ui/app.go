@@ -28,7 +28,7 @@ func BuildMainWindow(app fyne.App) fyne.Window {
 	centerPanel := container.NewVBox(
 		remotePanel.Container(),
 	)
-	rightPanel := container.NewVBox(
+	rightPanel := container.NewStack(
 		savedFilesList.Container(),
 	)
 

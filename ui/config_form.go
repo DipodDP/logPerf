@@ -96,7 +96,7 @@ func NewConfigForm() *ConfigForm {
 			widget.NewFormItem("Bandwidth", cf.bandwidthEntry),
 			widget.NewFormItem("Block Size", cf.blockSizeEntry),
 			widget.NewFormItem("Congestion", cf.congestionSelect),
-			widget.NewFormItem("Binary", cf.binaryEntry),
+			widget.NewFormItem("iperf3 path", cf.binaryEntry),
 		),
 	)
 

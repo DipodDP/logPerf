@@ -2,6 +2,9 @@ package ui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -43,7 +46,13 @@ func NewRemotePanel() *RemotePanel {
 	rp.userEntry.SetPlaceHolder("root")
 
 	rp.keyPathEntry = widget.NewEntry()
-	rp.keyPathEntry.SetPlaceHolder("~/.ssh/id_rsa")
+	sshKeyPlaceholder := "~/.ssh/id_rsa"
+	if runtime.GOOS == "windows" {
+		if home, err := os.UserHomeDir(); err == nil {
+			sshKeyPlaceholder = filepath.Join(home, ".ssh", "id_rsa")
+		}
+	}
+	rp.keyPathEntry.SetPlaceHolder(sshKeyPlaceholder)
 
 	rp.passwordEntry = widget.NewPasswordEntry()
 	rp.passwordEntry.SetPlaceHolder("Optional")

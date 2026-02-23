@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/color"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -70,12 +71,12 @@ func NewControls(cf *ConfigForm, ov *OutputView, sfl *SavedFilesList, rp *Remote
 	c.stopBtn.Disable()
 
 	c.fileNameEntry = widget.NewEntry()
-	c.fileNameEntry.SetPlaceHolder("results.csv")
+	c.fileNameEntry.SetPlaceHolder("results/results")
 
 	c.container = container.NewVBox(
 		c.startBtn,
 		c.stopBtn,
-		widget.NewLabel("Output File"),
+		widget.NewLabel("Output File Path and Name"),
 		c.fileNameEntry,
 	)
 	return c
@@ -288,7 +289,15 @@ func (c *Controls) autoSave(result *model.TestResult) {
 	baseName := strings.TrimSuffix(c.fileNameEntry.Text, ".csv")
 	if baseName == "" {
 		baseName = "results/results"
+	} else if filepath.Dir(baseName) == "." {
+		// Bare name with no directory component: put it under ./results/
+		baseName = filepath.Join("results", baseName)
 	}
+
+	dir := filepath.Dir(baseName)
+	fyne.Do(func() {
+		c.savedFilesList.SetDir(dir)
+	})
 
 	if err := export.EnsureDir(baseName + ".csv"); err != nil {
 		c.outputView.AppendLine(fmt.Sprintf("Auto-save error (mkdir): %v", err))
