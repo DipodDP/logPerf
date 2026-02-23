@@ -14,11 +14,12 @@ func BuildMainWindow(app fyne.App) fyne.Window {
 	remotePanel := NewRemotePanel()
 	outputView := NewOutputView()
 	savedFilesList := NewSavedFilesList()
-	controls := NewControls(configForm, outputView, savedFilesList, remotePanel)
+	controls := NewControls(configForm, outputView, savedFilesList, remotePanel, win)
 
 	prefs := app.Preferences()
 	configForm.LoadPreferences(prefs)
 	remotePanel.LoadPreferences(prefs)
+	controls.LoadPreferences(prefs)
 
 	leftPanel := container.NewVBox(
 		configForm.Container(),
@@ -76,6 +77,7 @@ func BuildMainWindow(app fyne.App) fyne.Window {
 	win.SetCloseIntercept(func() {
 		configForm.SavePreferences(prefs)
 		remotePanel.SavePreferences(prefs)
+		controls.SavePreferences(prefs)
 		prefs.SetBool("ui.show_files", showFiles)
 		// Save window size
 		size := win.Canvas().Size()

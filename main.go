@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
 
 	"fyne.io/fyne/v2/app"
 
@@ -37,6 +40,11 @@ func runCLI(cfg *cli.RunnerConfig) error {
 		return runRemoteServer(cfg)
 	}
 
+	// Handle repeat mode
+	if cfg.Repeat {
+		return runCLIRepeat(cfg)
+	}
+
 	// Handle local test
 	result, err := cli.LocalTestRunner(*cfg)
 	if err != nil {
@@ -44,6 +52,49 @@ func runCLI(cfg *cli.RunnerConfig) error {
 	}
 
 	cli.PrintResult(result)
+	return nil
+}
+
+func runCLIRepeat(cfg *cli.RunnerConfig) error {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	var stopped int32
+
+	go func() {
+		<-sigCh
+		fmt.Println("\nStop requested — finishing current measurement...")
+		atomic.StoreInt32(&stopped, 1)
+	}()
+
+	totalRuns := 0
+	for runNum := 1; ; runNum++ {
+		if atomic.LoadInt32(&stopped) == 1 {
+			break
+		}
+		if cfg.RepeatCount > 0 && runNum > cfg.RepeatCount {
+			break
+		}
+
+		if runNum > 1 {
+			fmt.Printf("\n--- Repeat run %d", runNum)
+			if cfg.RepeatCount > 0 {
+				fmt.Printf(" of %d", cfg.RepeatCount)
+			}
+			fmt.Println(" ---")
+		}
+
+		result, err := cli.LocalTestRunner(*cfg)
+		totalRuns++
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Run %d error: %v\n", runNum, err)
+			// Continue on transient errors (good for long-term monitoring)
+			continue
+		}
+		cli.PrintResult(result)
+	}
+
+	fmt.Printf("\nCompleted %d run(s).\n", totalRuns)
 	return nil
 }
 

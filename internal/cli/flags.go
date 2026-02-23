@@ -67,6 +67,10 @@ func ParseFlags() (*RunnerConfig, error) {
 	fs.BoolVar(&cfg.StopServer, "stop-server", false, "Stop remote iperf3 server")
 	fs.BoolVar(&cfg.InstallIperf, "install", false, "Install iperf3 on remote host")
 
+	// Repeat flags
+	fs.BoolVar(&cfg.Repeat, "repeat", false, "Repeat measurements in a loop until Ctrl-C (or --repeat-count reached)")
+	fs.IntVar(&cfg.RepeatCount, "repeat-count", 0, "Number of repeat iterations (0 = infinite)")
+
 	// Output flags
 	fs.StringVar(&cfg.OutputCSV, "o", "", "Output base path (default: results/results); date suffix added automatically")
 	fs.StringVar(&cfg.OutputCSV, "output", "", "Output base path (default: results/results); date suffix added automatically")
@@ -127,6 +131,10 @@ REMOTE SERVER MODE:
   --start-server           Start remote iperf3 server
   --stop-server            Stop remote iperf3 server
 
+REPEAT:
+  --repeat                 Repeat measurements in a loop until Ctrl-C (or --repeat-count reached)
+  --repeat-count <N>       Run exactly N iterations (0 = infinite, default: 0)
+
 OUTPUT:
   -o, --output <path>      Output base path (default: results/results); date appended automatically
   -v, --verbose            Verbose output
@@ -141,6 +149,12 @@ EXAMPLES:
 
   # Test via UDP
   iperf-tool -s 10.0.0.1 -u udp -t 20
+
+  # Repeat continuously until Ctrl-C
+  iperf-tool -s 192.168.1.1 -t 10 --repeat
+
+  # Repeat exactly 5 times
+  iperf-tool -s 192.168.1.1 -t 10 --repeat --repeat-count 5
 
   # Install iperf3 on remote server and start it
   iperf-tool --ssh remote.host --user ubuntu --key ~/.ssh/id_rsa --install --start-server

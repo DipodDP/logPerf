@@ -43,6 +43,10 @@ type RunnerConfig struct {
 	StopServer  bool
 	InstallIperf bool
 
+	// Repeat
+	Repeat      bool // loop until Ctrl-C or RepeatCount exhausted
+	RepeatCount int  // 0 = infinite; N > 0 = run exactly N times
+
 	// Output
 	OutputCSV string
 	Verbose   bool

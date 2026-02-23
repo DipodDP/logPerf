@@ -12,6 +12,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
 	"iperf-tool/internal/export"
@@ -31,11 +32,14 @@ const (
 
 // Controls manages the Start/Stop buttons and test execution with auto-save.
 type Controls struct {
-	mu    sync.Mutex
-	state testState
+	mu         sync.Mutex
+	state      testState
+	stopRepeat bool // signals repeat loop to exit; protected by mu
+	repeatOn   bool // toggle state of the repeat button
 
-	startBtn *StyledButton
-	stopBtn  *StyledButton
+	startBtn      *StyledButton
+	stopBtn       *StyledButton
+	repeatBtn     *StyledButton
 	fileNameEntry *widget.Entry
 
 	configForm     *ConfigForm
@@ -43,6 +47,7 @@ type Controls struct {
 	savedFilesList *SavedFilesList
 	remotePanel    *RemotePanel
 	runner         *iperf.Runner
+	win            fyne.Window
 
 	container *fyne.Container
 }
@@ -50,7 +55,7 @@ type Controls struct {
 // NewControls creates the control buttons wired to the given views.
 // Set IPERF_DEBUG=1 in the environment to enable raw stream logging to
 // /tmp/iperf-debug.log.
-func NewControls(cf *ConfigForm, ov *OutputView, sfl *SavedFilesList, rp *RemotePanel) *Controls {
+func NewControls(cf *ConfigForm, ov *OutputView, sfl *SavedFilesList, rp *RemotePanel, win fyne.Window) *Controls {
 	runner := iperf.NewRunner()
 	if os.Getenv("IPERF_DEBUG") == "1" {
 		runner = iperf.NewDebugRunner()
@@ -61,14 +66,18 @@ func NewControls(cf *ConfigForm, ov *OutputView, sfl *SavedFilesList, rp *Remote
 		savedFilesList: sfl,
 		remotePanel:    rp,
 		runner:         runner,
+		win:            win,
 	}
 
 	white := color.White
 	greenBg := color.NRGBA{R: 40, G: 167, B: 69, A: 255}
 	redBg := color.NRGBA{R: 220, G: 53, B: 69, A: 255}
+	repeatOffBg := color.NRGBA{R: 80, G: 80, B: 80, A: 255}
 	c.startBtn = NewStyledButton("Start Test", c.onStart, greenBg, white)
 	c.stopBtn = NewStyledButton("Stop Test", c.onStop, redBg, white)
 	c.stopBtn.Disable()
+
+	c.repeatBtn = NewStyledButton("Repeat: Off", c.onRepeatToggle, repeatOffBg, white)
 
 	c.fileNameEntry = widget.NewEntry()
 	c.fileNameEntry.SetPlaceHolder("results/results")
@@ -76,6 +85,7 @@ func NewControls(cf *ConfigForm, ov *OutputView, sfl *SavedFilesList, rp *Remote
 	c.container = container.NewVBox(
 		c.startBtn,
 		c.stopBtn,
+		c.repeatBtn,
 		widget.NewLabel("Output File Path and Name"),
 		c.fileNameEntry,
 	)
@@ -87,6 +97,37 @@ func (c *Controls) Container() *fyne.Container {
 	return c.container
 }
 
+func (c *Controls) onRepeatToggle() {
+	c.repeatOn = !c.repeatOn
+	if c.repeatOn {
+		c.repeatBtn.Text = "Repeat: On"
+		c.repeatBtn.bgColor = color.NRGBA{R: 204, G: 122, B: 0, A: 255}
+	} else {
+		c.repeatBtn.Text = "Repeat: Off"
+		c.repeatBtn.bgColor = color.NRGBA{R: 80, G: 80, B: 80, A: 255}
+	}
+	c.repeatBtn.Refresh()
+}
+
+// LoadPreferences restores persisted control state.
+func (c *Controls) LoadPreferences(prefs fyne.Preferences) {
+	if prefs.Bool("controls.repeat") {
+		c.repeatOn = true
+		c.repeatBtn.Text = "Repeat: On"
+		c.repeatBtn.bgColor = color.NRGBA{R: 204, G: 122, B: 0, A: 255}
+		c.repeatBtn.Refresh()
+	}
+	if v := prefs.String("controls.output_path"); v != "" {
+		c.fileNameEntry.SetText(v)
+	}
+}
+
+// SavePreferences persists control state.
+func (c *Controls) SavePreferences(prefs fyne.Preferences) {
+	prefs.SetBool("controls.repeat", c.repeatOn)
+	prefs.SetString("controls.output_path", c.fileNameEntry.Text)
+}
+
 func (c *Controls) onStart() {
 	c.mu.Lock()
 	if c.state == stateRunning {
@@ -94,6 +135,7 @@ func (c *Controls) onStart() {
 		return
 	}
 	c.state = stateRunning
+	c.stopRepeat = false
 	c.mu.Unlock()
 
 	c.startBtn.Disable()
@@ -103,143 +145,160 @@ func (c *Controls) onStart() {
 	cfg := c.configForm.Config()
 
 	if err := cfg.Validate(); err != nil {
-		c.outputView.AppendLine(fmt.Sprintf("Config error: %v", err))
+		c.outputView.AppendLine("Config error: " + err.Error())
 		c.resetState()
 		return
 	}
 
 	go func() {
 		defer c.resetState()
-
-		c.outputView.AppendLine(fmt.Sprintf("Starting iperf3 test to %s:%d ...", cfg.ServerAddr, cfg.Port))
-
-		ctx := context.Background()
-
-		// Phase 1: baseline ping
-		var baseline *ping.Result
-		if cfg.MeasurePing {
-			c.outputView.AppendLine("Running baseline ping (4 packets)...")
-			var err error
-			baseline, err = ping.Run(ctx, cfg.ServerAddr, 4)
-			if err != nil {
-				c.outputView.AppendLine(fmt.Sprintf("Baseline ping failed: %v", err))
-			} else {
-				c.outputView.AppendLine(fmt.Sprintf("Baseline latency: min/avg/max = %.2f / %.2f / %.2f ms",
-					baseline.MinMs, baseline.AvgMs, baseline.MaxMs))
+		for runNum := 1; ; runNum++ {
+			if runNum > 1 {
+				c.outputView.AppendLine(fmt.Sprintf("--- Repeat run %d ---", runNum))
+			}
+			if !c.runOnce(cfg) {
+				break
 			}
 		}
-
-		// Phase 2: start background ping during iperf
-		var loadedCh chan *ping.Result
-		var pingCancel context.CancelFunc
-		if cfg.MeasurePing {
-			var pingCtx context.Context
-			pingCtx, pingCancel = context.WithCancel(ctx)
-			loadedCh = make(chan *ping.Result, 1)
-			go func() {
-				loaded, err := ping.RunUntilCancel(pingCtx, cfg.ServerAddr)
-				if err != nil {
-					loadedCh <- nil
-				} else {
-					loadedCh <- loaded
-				}
-			}()
-		}
-
-		iperfVersion, versionErr := iperf.CheckVersion(cfg.BinaryPath)
-		useStream := versionErr == nil
-
-		// Check congestion control support
-		supportsCongestion := iperf.SupportsCongestionControl(cfg.BinaryPath)
-		if cfg.Congestion != "" && !supportsCongestion {
-			c.outputView.AppendLine("Warning: Congestion control not supported on this platform, ignoring -C flag")
-		}
-
-		result, err := c.runTest(cfg, useStream)
-
-		// If the server is busy and we have an SSH connection, restart and retry once.
-		if err != nil && isServerBusy(err) {
-			if c.remotePanel.IsConnected() {
-				c.outputView.AppendLine("Server is busy, restarting remote iperf3...")
-				if restartErr := c.remotePanel.RestartServer(); restartErr != nil {
-					c.outputView.AppendLine(fmt.Sprintf("Restart failed: %v", restartErr))
-				} else {
-					c.outputView.AppendLine("Server restarted, retrying test...")
-					time.Sleep(time.Second)
-					result, err = c.runTest(cfg, useStream)
-				}
-			} else {
-				c.outputView.AppendLine("Tip: connect via SSH in the Remote panel, then retry — the server will be restarted automatically.")
-			}
-		}
-
-		// Stop background ping and collect results
-		hostname, _ := os.Hostname()
-		localIP := netutil.OutboundIP()
-		var pingBaseline, pingLoaded *model.PingResult
-		if cfg.MeasurePing && pingCancel != nil {
-			pingCancel()
-			loaded := <-loadedCh
-			pingBaseline = baseline.ToModel()
-			pingLoaded = loaded.ToModel()
-		}
-
-		if err != nil {
-			c.outputView.AppendLine(fmt.Sprintf("Error: %v", err))
-			errResult := model.TestResult{
-				Timestamp:     time.Now(),
-				ServerAddr:    cfg.ServerAddr,
-				Port:          cfg.Port,
-				Protocol:      cfg.Protocol,
-				Duration:      cfg.Duration,
-				Parallel:      cfg.Parallel,
-				BlockSize:     cfg.BlockSize,
-				Error:         err.Error(),
-				Mode:          "GUI",
-				LocalHostname: hostname,
-				LocalIP:       localIP,
-				IperfVersion:  iperfVersion,
-				PingBaseline:  pingBaseline,
-				PingLoaded:    pingLoaded,
-			}
-			if cfg.Bidir {
-				errResult.Direction = "Bidirectional"
-			} else if cfg.Reverse {
-				errResult.Direction = "Reverse"
-			}
-			errResult.MeasurementID = export.NextMeasurementID(errResult.Timestamp)
-			c.autoSave(&errResult)
-			return
-		}
-
-		// Set config echo fields on the successful result.
-		// Always override with config values — parsed values may be empty on
-		// partial runs (e.g. connection refused after start event).
-		cfg.ApplyToResult(result, "GUI")
-		// Only set congestion if it was actually used (platform supports it)
-		if supportsCongestion {
-			result.Congestion = cfg.Congestion
-		}
-		result.LocalHostname = hostname
-		result.LocalIP = localIP
-		result.IperfVersion = iperfVersion
-		result.PingBaseline = pingBaseline
-		result.PingLoaded = pingLoaded
-		if c.remotePanel.IsConnected() {
-			result.SSHRemoteHost = c.remotePanel.Host()
-		}
-		result.MeasurementID = export.NextMeasurementID(result.Timestamp)
-
-		if useStream {
-			c.outputView.AppendLine("")
-			c.outputView.AppendLine(format.FormatResult(result))
-		} else {
-			c.outputView.Clear()
-			c.outputView.AppendLine(format.FormatResult(result))
-		}
-
-		c.autoSave(result)
 	}()
+}
+
+// runOnce executes a single iperf3 measurement and returns true if the repeat
+// loop should continue, false if it should stop.
+func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
+	c.outputView.AppendLine(fmt.Sprintf("Starting iperf3 test to %s:%d ...", cfg.ServerAddr, cfg.Port))
+
+	ctx := context.Background()
+
+	// Phase 1: baseline ping
+	var baseline *ping.Result
+	if cfg.MeasurePing {
+		c.outputView.AppendLine("Running baseline ping (4 packets)...")
+		var err error
+		baseline, err = ping.Run(ctx, cfg.ServerAddr, 4)
+		if err != nil {
+			c.outputView.AppendLine(fmt.Sprintf("Baseline ping failed: %v", err))
+		} else {
+			c.outputView.AppendLine(fmt.Sprintf("Baseline latency: min/avg/max = %.2f / %.2f / %.2f ms",
+				baseline.MinMs, baseline.AvgMs, baseline.MaxMs))
+		}
+	}
+
+	// Phase 2: start background ping during iperf
+	var loadedCh chan *ping.Result
+	var pingCancel context.CancelFunc
+	if cfg.MeasurePing {
+		var pingCtx context.Context
+		pingCtx, pingCancel = context.WithCancel(ctx)
+		loadedCh = make(chan *ping.Result, 1)
+		go func() {
+			loaded, err := ping.RunUntilCancel(pingCtx, cfg.ServerAddr)
+			if err != nil {
+				loadedCh <- nil
+			} else {
+				loadedCh <- loaded
+			}
+		}()
+	}
+
+	iperfVersion, versionErr := iperf.CheckVersion(cfg.BinaryPath)
+	useStream := versionErr == nil
+
+	// Check congestion control support
+	supportsCongestion := iperf.SupportsCongestionControl(cfg.BinaryPath)
+	if cfg.Congestion != "" && !supportsCongestion {
+		c.outputView.AppendLine("Warning: Congestion control not supported on this platform, ignoring -C flag")
+	}
+
+	result, err := c.runTest(cfg, useStream)
+
+	// If the server is busy and we have an SSH connection, restart and retry once.
+	if err != nil && isServerBusy(err) {
+		if c.remotePanel.IsConnected() {
+			c.outputView.AppendLine("Server is busy, restarting remote iperf3...")
+			if restartErr := c.remotePanel.RestartServer(); restartErr != nil {
+				c.outputView.AppendLine(fmt.Sprintf("Restart failed: %v", restartErr))
+			} else {
+				c.outputView.AppendLine("Server restarted, retrying test...")
+				time.Sleep(time.Second)
+				result, err = c.runTest(cfg, useStream)
+			}
+		} else {
+			c.outputView.AppendLine("Tip: connect via SSH in the Remote panel, then retry — the server will be restarted automatically.")
+		}
+	}
+
+	// Stop background ping and collect results
+	hostname, _ := os.Hostname()
+	localIP := netutil.OutboundIP()
+	var pingBaseline, pingLoaded *model.PingResult
+	if cfg.MeasurePing && pingCancel != nil {
+		pingCancel()
+		loaded := <-loadedCh
+		pingBaseline = baseline.ToModel()
+		pingLoaded = loaded.ToModel()
+	}
+
+	if err != nil {
+		c.outputView.AppendLine(fmt.Sprintf("Error: %v", err))
+		errResult := model.TestResult{
+			Timestamp:     time.Now(),
+			ServerAddr:    cfg.ServerAddr,
+			Port:          cfg.Port,
+			Protocol:      cfg.Protocol,
+			Duration:      cfg.Duration,
+			Parallel:      cfg.Parallel,
+			BlockSize:     cfg.BlockSize,
+			Error:         err.Error(),
+			Mode:          "GUI",
+			LocalHostname: hostname,
+			LocalIP:       localIP,
+			IperfVersion:  iperfVersion,
+			PingBaseline:  pingBaseline,
+			PingLoaded:    pingLoaded,
+		}
+		if cfg.Bidir {
+			errResult.Direction = "Bidirectional"
+		} else if cfg.Reverse {
+			errResult.Direction = "Reverse"
+		}
+		errResult.MeasurementID = export.NextMeasurementID(errResult.Timestamp)
+		c.autoSave(&errResult)
+		return false
+	}
+
+	// Set config echo fields on the successful result.
+	// Always override with config values — parsed values may be empty on
+	// partial runs (e.g. connection refused after start event).
+	cfg.ApplyToResult(result, "GUI")
+	// Only set congestion if it was actually used (platform supports it)
+	if supportsCongestion {
+		result.Congestion = cfg.Congestion
+	}
+	result.LocalHostname = hostname
+	result.LocalIP = localIP
+	result.IperfVersion = iperfVersion
+	result.PingBaseline = pingBaseline
+	result.PingLoaded = pingLoaded
+	if c.remotePanel.IsConnected() {
+		result.SSHRemoteHost = c.remotePanel.Host()
+	}
+	result.MeasurementID = export.NextMeasurementID(result.Timestamp)
+
+	if useStream {
+		c.outputView.AppendLine("")
+		c.outputView.AppendLine(format.FormatResult(result))
+	} else {
+		c.outputView.Clear()
+		c.outputView.AppendLine(format.FormatResult(result))
+	}
+
+	c.autoSave(result)
+
+	c.mu.Lock()
+	cont := c.repeatOn && !c.stopRepeat
+	c.mu.Unlock()
+	return cont
 }
 
 // runTest executes a single iperf3 test, printing live output along the way.
@@ -277,12 +336,37 @@ func isServerBusy(err error) bool {
 	return strings.Contains(err.Error(), "server is busy")
 }
 
+// onStop is always called on the UI thread (button tap handler).
 func (c *Controls) onStop() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.state == stateRunning {
-		c.runner.Stop()
+	if c.state != stateRunning {
+		c.mu.Unlock()
+		return
 	}
+	c.mu.Unlock()
+
+	// Read widget state on UI thread, outside the mutex.
+	if c.repeatOn {
+		d := dialog.NewCustomConfirm(
+			"Stop Repeat",
+			"Interrupt Now", "Finish This Run",
+			widget.NewLabel("Interrupt the current measurement now, or let it finish first?"),
+			func(interrupt bool) {
+				c.mu.Lock()
+				c.stopRepeat = true
+				c.mu.Unlock()
+				if interrupt {
+					c.runner.Stop()
+				}
+			},
+			c.win,
+		)
+		d.Show()
+		return
+	}
+
+	// Non-repeat: stop immediately as before.
+	c.runner.Stop()
 }
 
 func (c *Controls) autoSave(result *model.TestResult) {
@@ -334,6 +418,7 @@ func (c *Controls) autoSave(result *model.TestResult) {
 func (c *Controls) resetState() {
 	c.mu.Lock()
 	c.state = stateIdle
+	c.stopRepeat = false
 	c.mu.Unlock()
 	fyne.Do(func() {
 		c.startBtn.Enable()
