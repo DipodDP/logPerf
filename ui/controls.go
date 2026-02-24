@@ -13,6 +13,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"iperf-tool/internal/export"
@@ -347,20 +348,25 @@ func (c *Controls) onStop() {
 
 	// Read widget state on UI thread, outside the mutex.
 	if c.repeatOn {
-		d := dialog.NewCustomConfirm(
-			"Stop Repeat",
-			"Interrupt Now", "Finish This Run",
+		var d *dialog.CustomDialog
+		interruptBtn := widget.NewButtonWithIcon("Interrupt Now", theme.MediaStopIcon(), func() {
+			d.Hide()
+			c.mu.Lock()
+			c.stopRepeat = true
+			c.mu.Unlock()
+			c.runner.Stop()
+		})
+		finishBtn := widget.NewButtonWithIcon("Finish This Run", theme.MediaReplayIcon(), func() {
+			d.Hide()
+			c.mu.Lock()
+			c.stopRepeat = true
+			c.mu.Unlock()
+		})
+		content := container.NewVBox(
 			widget.NewLabel("Interrupt the current measurement now, or let it finish first?"),
-			func(interrupt bool) {
-				c.mu.Lock()
-				c.stopRepeat = true
-				c.mu.Unlock()
-				if interrupt {
-					c.runner.Stop()
-				}
-			},
-			c.win,
+			container.NewHBox(interruptBtn, finishBtn),
 		)
+		d = dialog.NewCustom("Stop Repeat", "Cancel", content, c.win)
 		d.Show()
 		return
 	}

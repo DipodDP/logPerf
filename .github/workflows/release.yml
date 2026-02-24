@@ -1,0 +1,200 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  GOTOOLCHAIN: local
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.7'
+          cache: true
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc \
+            libgl1-mesa-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxxf86vm-dev \
+            xorg-dev \
+            pkg-config
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Build Linux amd64
+        env:
+          CGO_ENABLED: '1'
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -v -o dist/linux-amd64/iperf-tool .
+
+      - name: Upload Linux amd64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: builds-linux-amd64
+          path: dist/
+
+  build-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.7'
+          cache: true
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc \
+            libgl1-mesa-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxxf86vm-dev \
+            xorg-dev \
+            pkg-config
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Build Linux arm64
+        env:
+          CGO_ENABLED: '1'
+          GOOS: linux
+          GOARCH: arm64
+        run: go build -v -o dist/linux-arm64/iperf-tool .
+
+      - name: Upload Linux arm64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: builds-linux-arm64
+          path: dist/
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.7'
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Build Windows amd64
+        env:
+          CGO_ENABLED: '1'
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          $env:PATH = "C:\msys64\mingw64\bin;" + $env:PATH
+          go build -v -o dist/windows-amd64/iperf-tool.exe .
+
+      - name: Upload Windows binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: builds-windows
+          path: dist/
+
+  build-darwin:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.7'
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Build macOS arm64
+        env:
+          CGO_ENABLED: '1'
+          GOOS: darwin
+          GOARCH: arm64
+        run: go build -v -o dist/darwin-arm64/iperf-tool .
+
+      - name: Build macOS amd64
+        env:
+          CGO_ENABLED: '1'
+          GOOS: darwin
+          GOARCH: amd64
+          CGO_CFLAGS: '-mmacosx-version-min=10.15'
+          CGO_LDFLAGS: '-mmacosx-version-min=10.15'
+        run: go build -v -o dist/darwin-amd64/iperf-tool .
+
+      - name: Upload macOS binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: builds-darwin
+          path: dist/
+
+  release:
+    needs: [build-linux-amd64, build-linux-arm64, build-windows, build-darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: builds-*
+          path: dist
+          merge-multiple: true
+
+      - name: List dist contents
+        run: find dist -type f
+
+      - name: Rename binaries for release
+        run: |
+          cp dist/linux-amd64/iperf-tool   dist/iperf-tool-linux-amd64
+          cp dist/linux-arm64/iperf-tool   dist/iperf-tool-linux-arm64
+          cp dist/windows-amd64/iperf-tool.exe dist/iperf-tool-windows-amd64.exe
+          cp dist/darwin-amd64/iperf-tool  dist/iperf-tool-darwin-amd64
+          cp dist/darwin-arm64/iperf-tool  dist/iperf-tool-darwin-arm64
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --notes "" \
+            dist/iperf-tool-linux-amd64 \
+            dist/iperf-tool-linux-arm64 \
+            dist/iperf-tool-windows-amd64.exe \
+            dist/iperf-tool-darwin-amd64 \
+            dist/iperf-tool-darwin-arm64
