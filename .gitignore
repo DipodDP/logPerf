@@ -46,3 +46,8 @@ ui/build/
 # Temporary files from current working directory
 .gemini/
 .claude/
+
+# Build artifacts
+bin/
+dist/
+coverage.out
