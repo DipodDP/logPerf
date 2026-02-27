@@ -43,7 +43,8 @@ func ParseFlags() (*RunnerConfig, error) {
 	fs.IntVar(&cfg.Duration, "time", cfg.Duration, "Test duration in seconds")
 	fs.IntVar(&cfg.Interval, "i", cfg.Interval, "Reporting interval in seconds")
 	fs.IntVar(&cfg.Interval, "interval", cfg.Interval, "Reporting interval in seconds")
-	fs.StringVar(&cfg.Protocol, "u", cfg.Protocol, "UDP mode (use 'udp', default 'tcp')")
+	var udpFlag bool
+	fs.BoolVar(&udpFlag, "u", false, "UDP mode (shorthand for --protocol udp)")
 	fs.StringVar(&cfg.Protocol, "protocol", cfg.Protocol, "Protocol (tcp or udp, default 'tcp')")
 	fs.IntVar(&cfg.BlockSize, "l", 0, "Block size (buffer/datagram size in bytes)")
 	fs.IntVar(&cfg.BlockSize, "block-size", 0, "Block size (buffer/datagram size in bytes)")
@@ -82,8 +83,8 @@ func ParseFlags() (*RunnerConfig, error) {
 		return nil, err
 	}
 
-	// Normalize protocol
-	if cfg.Protocol == "udp" || cfg.Protocol == "u" {
+	// Normalize protocol: -u flag takes precedence over --protocol
+	if udpFlag || cfg.Protocol == "udp" || cfg.Protocol == "u" {
 		cfg.Protocol = "udp"
 	} else {
 		cfg.Protocol = "tcp"
@@ -112,7 +113,8 @@ LOCAL TEST MODE:
   -P, --parallel <num>     Parallel streams (default: 1)
   -t, --time <sec>         Test duration in seconds (default: 10)
   -i, --interval <sec>     Reporting interval (default: 1)
-  -u, --protocol <tcp|udp> Protocol mode (default: tcp)
+  -u                       UDP mode (shorthand for --protocol udp)
+      --protocol <tcp|udp> Protocol (default: tcp)
   -l, --block-size <bytes> Block size / buffer length (default: iperf3 default)
   -R, --reverse            Reverse mode (server sends, client receives)
   --bidir                  Bidirectional mode (simultaneous both directions)
@@ -148,7 +150,7 @@ EXAMPLES:
   iperf-tool -s server.example.com -t 60 -v
 
   # Test via UDP
-  iperf-tool -s 10.0.0.1 -u udp -t 20
+  iperf-tool -s 10.0.0.1 -u -t 20
 
   # Repeat continuously until Ctrl-C
   iperf-tool -s 192.168.1.1 -t 10 --repeat

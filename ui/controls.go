@@ -141,7 +141,6 @@ func (c *Controls) onStart() {
 
 	c.startBtn.Disable()
 	c.stopBtn.Enable()
-	c.outputView.Clear()
 
 	cfg := c.configForm.Config()
 
@@ -150,6 +149,8 @@ func (c *Controls) onStart() {
 		c.resetState()
 		return
 	}
+
+	c.outputView.Clear()
 
 	go func() {
 		defer c.resetState()
@@ -213,19 +214,32 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 
 	result, err := c.runTest(cfg, useStream)
 
-	// If the server is busy and we have an SSH connection, restart and retry once.
-	if err != nil && isServerBusy(err) {
+	// If a stream socket error occurred, fall back to standard -J mode.
+	// Exception: UDP bidir also fails in -J mode on Windows/Cygwin servers —
+	// in that case surface a helpful error rather than retrying pointlessly.
+	if err != nil && isStreamSocketError(err) {
+		if strings.EqualFold(cfg.Protocol, "udp") && cfg.Bidir {
+			err = fmt.Errorf("UDP bidirectional mode is not supported by the remote iperf3 server (known Cygwin/Windows limitation); use TCP for bidir, or UDP with Normal/Reverse direction")
+		} else if useStream {
+			c.outputView.AppendLine("Note: stream mode failed, retrying in standard JSON mode...")
+			result, err = c.runTest(cfg, false)
+		}
+	}
+
+	// If the test failed to reach the server and we have an SSH connection,
+	// start (or restart) the remote iperf3 and retry once.
+	if err != nil && isServerUnreachable(err) {
 		if c.remotePanel.IsConnected() {
-			c.outputView.AppendLine("Server is busy, restarting remote iperf3...")
+			c.outputView.AppendLine("Server not responding, starting remote iperf3...")
 			if restartErr := c.remotePanel.RestartServer(); restartErr != nil {
-				c.outputView.AppendLine(fmt.Sprintf("Restart failed: %v", restartErr))
+				c.outputView.AppendLine(fmt.Sprintf("Start failed: %v", restartErr))
 			} else {
-				c.outputView.AppendLine("Server restarted, retrying test...")
+				c.outputView.AppendLine("Server started, retrying test...")
 				time.Sleep(time.Second)
 				result, err = c.runTest(cfg, useStream)
 			}
 		} else {
-			c.outputView.AppendLine("Tip: connect via SSH in the Remote panel, then retry — the server will be restarted automatically.")
+			c.outputView.AppendLine("Tip: connect via SSH in the Remote panel, then retry — the server will be started automatically.")
 		}
 	}
 
@@ -333,8 +347,23 @@ func (c *Controls) runTest(cfg iperf.IperfConfig, useStream bool) (*model.TestRe
 	})
 }
 
-func isServerBusy(err error) bool {
-	return strings.Contains(err.Error(), "server is busy")
+func isServerUnreachable(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "server is busy") ||
+		strings.Contains(msg, "unable to connect") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "timed out") ||
+		strings.Contains(msg, "Operation timed out") ||
+		strings.Contains(msg, "Connection reset by peer")
+}
+
+// isStreamSocketError returns true for iperf3 errors that are specific to
+// --json-stream mode and indicate a fallback to standard -J mode is needed.
+// These are not server-unreachable errors; they are iperf3 UDP/socket bugs.
+func isStreamSocketError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "unable to read from stream socket") ||
+		strings.Contains(msg, "unable to receive control message")
 }
 
 // onStop is always called on the UI thread (button tap handler).

@@ -69,13 +69,28 @@ func TestParseFlags_UDP(t *testing.T) {
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 
-	os.Args = []string{"iperf-tool", "-server", "10.0.0.1", "-u", "udp"}
+	os.Args = []string{"iperf-tool", "-server", "10.0.0.1", "-u"}
 
 	cfg, err := ParseFlags()
 	if err != nil {
 		t.Fatalf("ParseFlags() error = %v", err)
 	}
 
+	if cfg.Protocol != "udp" {
+		t.Errorf("Protocol = %q, want udp", cfg.Protocol)
+	}
+}
+
+func TestParseFlags_UDPProtocolFlag(t *testing.T) {
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	os.Args = []string{"iperf-tool", "-server", "10.0.0.1", "--protocol", "udp"}
+
+	cfg, err := ParseFlags()
+	if err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
 	if cfg.Protocol != "udp" {
 		t.Errorf("Protocol = %q, want udp", cfg.Protocol)
 	}

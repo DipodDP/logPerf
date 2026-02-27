@@ -195,7 +195,28 @@ func runIperfTest(runner *iperf.Runner, iperfCfg iperf.IperfConfig, cfg RunnerCo
 			fmt.Println(ts + "  " + format.FormatInterval(fwd, isUDP))
 		}
 	})
+
+	// Fall back to standard -J mode on iperf3 stream-socket errors (UDP EAGAIN bug).
+	// Exception: UDP bidir also fails in -J mode on Windows/Cygwin servers —
+	// surface a helpful error rather than retrying pointlessly.
+	if err != nil && isStreamSocketError(err) {
+		if strings.EqualFold(iperfCfg.Protocol, "udp") && iperfCfg.Bidir {
+			return nil, version, fmt.Errorf("UDP bidirectional mode is not supported by the remote iperf3 server (known Cygwin/Windows limitation); use TCP for bidir, or UDP with Normal/Reverse direction")
+		}
+		fmt.Printf("Note: stream mode failed (%v) — retrying in standard JSON mode\n", err)
+		result, err = runner.RunWithPipe(context.Background(), iperfCfg, func(line string) {
+			if cfg.Verbose {
+				fmt.Println(line)
+			}
+		})
+	}
 	return result, version, err
+}
+
+func isStreamSocketError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "unable to read from stream socket") ||
+		strings.Contains(msg, "unable to receive control message")
 }
 
 func saveResults(result *model.TestResult, cfg RunnerConfig) {

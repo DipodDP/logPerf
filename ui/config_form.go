@@ -119,6 +119,13 @@ func (cf *ConfigForm) Container() *fyne.Container {
 	return cf.form
 }
 
+// SetServerAddrIfEmpty sets the server address only when the field is currently blank.
+func (cf *ConfigForm) SetServerAddrIfEmpty(addr string) {
+	if cf.serverEntry.Text == "" {
+		cf.serverEntry.SetText(addr)
+	}
+}
+
 // LoadPreferences restores form values from persistent preferences.
 func (cf *ConfigForm) LoadPreferences(prefs fyne.Preferences) {
 	if v := prefs.String("config.server_addr"); v != "" {

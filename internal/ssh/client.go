@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -24,11 +25,12 @@ type Client struct {
 
 // ConnectConfig holds SSH connection parameters.
 type ConnectConfig struct {
-	Host     string
-	Port     int
-	User     string
-	KeyPath  string // path to private key file
-	Password string // fallback if KeyPath is empty
+	Host               string
+	Port               int
+	User               string
+	KeyPath            string // path to private key file
+	Password           string // fallback if KeyPath is empty
+	InsecureSkipVerify bool   // disables host key checking; use only where known_hosts is unavailable
 }
 
 // DefaultKeyPaths returns common SSH private key paths that exist on disk.
@@ -107,9 +109,9 @@ func Connect(cfg ConnectConfig) (*Client, error) {
 		return nil, fmt.Errorf("no SSH auth method available (no key found in ~/.ssh/ and no password provided)")
 	}
 
-	hostKeyCallback, err := knownHostsCallback()
+	hostKeyCallback, err := buildHostKeyCallback(cfg)
 	if err != nil {
-		hostKeyCallback = ssh.InsecureIgnoreHostKey()
+		return nil, fmt.Errorf("configure host key verification: %w", err)
 	}
 
 	sshConfig := &ssh.ClientConfig{
@@ -164,6 +166,7 @@ func (c *Client) Close() error {
 	return nil
 }
 
+
 // sshAgentSigners returns signers from the running SSH agent, or nil.
 func sshAgentSigners() []ssh.Signer {
 	sock := os.Getenv("SSH_AUTH_SOCK")
@@ -209,6 +212,9 @@ func lookupProxyCommand(host string) string {
 		if key == "host" {
 			currentHosts = strings.Fields(val)
 		} else if key == "proxycommand" && matchesHost(host, currentHosts) {
+			if strings.ToLower(val) == "none" {
+				return ""
+			}
 			return val
 		}
 	}
@@ -237,6 +243,10 @@ func matchesHost(host string, patterns []string) bool {
 		}
 		// Simple prefix/suffix glob: e.g. "*.example.com"
 		if strings.HasPrefix(p, "*") && strings.HasSuffix(host, p[1:]) {
+			return true
+		}
+		// Simple prefix glob: e.g. "192.168.*"
+		if strings.HasSuffix(p, "*") && strings.HasPrefix(host, p[:len(p)-1]) {
 			return true
 		}
 	}
@@ -297,14 +307,63 @@ func (p *proxyRWC) SetDeadline(t time.Time) error      { return nil }
 func (p *proxyRWC) SetReadDeadline(t time.Time) error  { return nil }
 func (p *proxyRWC) SetWriteDeadline(t time.Time) error { return nil }
 
-func knownHostsCallback() (ssh.HostKeyCallback, error) {
+func buildHostKeyCallback(cfg ConnectConfig) (ssh.HostKeyCallback, error) {
+	if cfg.InsecureSkipVerify {
+		fmt.Fprintln(os.Stderr, "Warning: SSH host key verification disabled (InsecureSkipVerify).")
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		fmt.Fprintf(os.Stderr, "Warning: cannot determine home directory (%v); host key verification disabled.\n", err)
+		return ssh.InsecureIgnoreHostKey(), nil
 	}
-	path := filepath.Join(home, ".ssh", "known_hosts")
-	if _, err := os.Stat(path); err != nil {
-		return nil, err
+	sshDir := filepath.Join(home, ".ssh")
+	knownHostsPath := filepath.Join(sshDir, "known_hosts")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot create %s (%v); host key verification disabled.\n", sshDir, err)
+		return ssh.InsecureIgnoreHostKey(), nil
 	}
-	return knownhosts.New(path)
+	if _, statErr := os.Stat(knownHostsPath); os.IsNotExist(statErr) {
+		f, createErr := os.OpenFile(knownHostsPath, os.O_CREATE|os.O_WRONLY, 0o600)
+		if createErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cannot create %s (%v); host key verification disabled.\n", knownHostsPath, createErr)
+			return ssh.InsecureIgnoreHostKey(), nil
+		}
+		f.Close()
+	}
+	return tofuHostKeyCallback(knownHostsPath)
+}
+
+func tofuHostKeyCallback(knownHostsPath string) (ssh.HostKeyCallback, error) {
+	strictCallback, err := knownhosts.New(knownHostsPath)
+	if err != nil {
+		return nil, fmt.Errorf("load known_hosts: %w", err)
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		err := strictCallback(hostname, remote, key)
+		if err == nil {
+			return nil
+		}
+		var keyErr *knownhosts.KeyError
+		if !errors.As(err, &keyErr) {
+			return err
+		}
+		if len(keyErr.Want) > 0 {
+			return fmt.Errorf("SSH host key mismatch for %s: expected %s, got %s — possible MITM; "+
+				"if the server was reprovisioned, remove the old entry from %s",
+				hostname, keyErr.Want[0].Key.Type(), key.Type(), knownHostsPath)
+		}
+		// New host — TOFU: append and allow
+		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
+		f, err := os.OpenFile(knownHostsPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+		if err != nil {
+			return fmt.Errorf("add host key to %s: %w", knownHostsPath, err)
+		}
+		defer f.Close()
+		if _, err := fmt.Fprintln(f, line); err != nil {
+			return fmt.Errorf("write host key to %s: %w", knownHostsPath, err)
+		}
+		fmt.Printf("Warning: permanently added '%s' (%s) to the list of known hosts.\n", hostname, key.Type())
+		return nil
+	}, nil
 }

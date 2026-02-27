@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -39,6 +40,26 @@ func TestRemoteServerRunner(t *testing.T) {
 
 	// Connection check without actual SSH should fail gracefully
 	// (we don't want to test against a real server)
+}
+
+func TestIsStreamSocketError(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want bool
+	}{
+		{"iperf3: unable to read from stream socket: Resource temporarily unavailable", true},
+		{"iperf3: unable to receive control message: Connection reset by peer", true},
+		{"iperf3: error - unable to connect to server: Connection refused", false},
+		{"iperf3: the server is busy running a test", false},
+		{"server is busy", false},
+		{"connection refused", false},
+	}
+	for _, tc := range cases {
+		got := isStreamSocketError(fmt.Errorf("%s", tc.msg))
+		if got != tc.want {
+			t.Errorf("isStreamSocketError(%q) = %v, want %v", tc.msg, got, tc.want)
+		}
+	}
 }
 
 func TestPrintResult(t *testing.T) {

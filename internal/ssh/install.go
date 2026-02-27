@@ -40,13 +40,17 @@ func (c *Client) DetectOS() (OSType, error) {
 
 // CheckIperf3Installed checks if iperf3 is available on the remote system.
 func (c *Client) CheckIperf3Installed() (bool, error) {
+	// Linux/Mac check
 	_, err := c.RunCommand("which iperf3")
 	if err == nil {
 		return true, nil
 	}
 
-	// Windows fallback
-	_, err = c.RunCommand("cmd /c where iperf3")
+	// Windows fallback using PowerShell
+	// Also explicitly check the C:\iperf3 extracted path, 
+	// since SSH shells sometimes don't reload new PATH variables instantly.
+	winCheckCmd := `powershell -Command "if (Get-Command iperf3 -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path \"C:\iperf3\iperf3.exe\") { exit 0 } else { exit 1 }"`
+	_, err = c.RunCommand(winCheckCmd)
 	return err == nil, nil
 }
 
@@ -66,7 +70,7 @@ func (c *Client) InstallIperf3() error {
 	}
 
 	// Check for sudo/administrator privileges
-	hasSudo, err := c.hasSudoPrivilege()
+	hasSudo, err := c.hasSudoPrivilege(os)
 	if err != nil || !hasSudo {
 		return fmt.Errorf("requires sudo/administrator privileges to install iperf3")
 	}
@@ -102,7 +106,12 @@ func (c *Client) InstallIperf3() error {
 }
 
 // hasSudoPrivilege checks if the user has sudo/administrator access.
-func (c *Client) hasSudoPrivilege() (bool, error) {
+func (c *Client) hasSudoPrivilege(osType OSType) (bool, error) {
+	if osType == OSWindows {
+		// Windows doesn't use sudo, Winget will handle elevation natively or install per-user
+		return true, nil
+	}
+
 	// Try to run a simple sudo command without password
 	_, err := c.RunCommand("sudo -n true")
 	return err == nil, nil
@@ -143,19 +152,10 @@ func (c *Client) installMacOS() (string, error) {
 }
 
 // installWindows returns the command to install iperf3 on Windows.
-// Attempts to use Chocolatey if available, otherwise suggests manual installation.
+// We explicitly bypass package managers like Chocolatey and Winget because
+// their iperf3 packages are notoriously outdated (v3.1.3) and crash on UDP.
+// Instead, we download and extract a modern, community-maintained build (v3.20).
 func (c *Client) installWindows() (string, error) {
-	// Check if Chocolatey is available
-	if _, err := c.RunCommand("cmd /c choco --version"); err == nil {
-		// Use Chocolatey with elevated privileges
-		return "powershell -Command \"Start-Process powershell -ArgumentList 'choco install -y iperf3' -Verb RunAs\"", nil
-	}
-
-	// Fallback: Windows doesn't have built-in package managers like Linux/macOS
-	// We can try to install via winget if available (Windows 10+)
-	if _, err := c.RunCommand("cmd /c winget --version"); err == nil {
-		return "powershell -Command \"Start-Process powershell -ArgumentList 'winget install -e --id EricSilva.iPerf3' -Verb RunAs\"", nil
-	}
-
-	return "", fmt.Errorf("no supported package manager found (chocolatey or winget); please install iperf3 manually from https://iperf.fr/iperf-download.php")
+	psCmd := `powershell -Command "$ProgressPreference = 'SilentlyContinue'; $dir='C:\iperf3'; $zip=\"$env:TEMP\iperf3.zip\"; if (!(Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }; Invoke-WebRequest -Uri 'https://github.com/ar51an/iperf3-win-builds/releases/download/3.20/iperf-3.20-win64.zip' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dir -Force; Remove-Item -Path $zip -Force; $path=[Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine); if ($path -notmatch [regex]::Escape($dir)) { [Environment]::SetEnvironmentVariable('Path', $path + ';' + $dir, [EnvironmentVariableTarget]::Machine) }"`
+	return psCmd, nil
 }

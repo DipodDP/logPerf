@@ -16,6 +16,11 @@ func BuildMainWindow(app fyne.App) fyne.Window {
 	savedFilesList := NewSavedFilesList()
 	controls := NewControls(configForm, outputView, savedFilesList, remotePanel, win)
 
+	// Auto-fill the server address from the SSH host on successful connect.
+	remotePanel.OnConnect = func(host string) {
+		configForm.SetServerAddrIfEmpty(host)
+	}
+
 	prefs := app.Preferences()
 	configForm.LoadPreferences(prefs)
 	remotePanel.LoadPreferences(prefs)
