@@ -181,14 +181,11 @@ func TestToArgs_Bidir(t *testing.T) {
 	cfg := validConfig()
 	cfg.Bidir = true
 	args := cfg.ToArgs(true) // assume congestion supported in tests
-	found := false
+	// --bidir should NOT be in args — bidir is handled by RunBidir (two processes).
 	for _, a := range args {
 		if a == "--bidir" {
-			found = true
+			t.Errorf("unexpected --bidir in args %v; bidir is handled by RunBidir", args)
 		}
-	}
-	if !found {
-		t.Errorf("expected --bidir in args, got %v", args)
 	}
 }
 

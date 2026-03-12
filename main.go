@@ -129,6 +129,9 @@ func runRemoteServer(cfg *cli.RunnerConfig) error {
 
 	// Run local test if server address provided
 	if cfg.ServerAddr != "" {
+		cfg.RestartServerFunc = func(numInstances int) error {
+			return runner.Restart(numInstances)
+		}
 		result, err := cli.LocalTestRunner(*cfg)
 		if err != nil {
 			return err

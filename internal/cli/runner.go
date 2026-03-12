@@ -47,6 +47,11 @@ type RunnerConfig struct {
 	Repeat      bool // loop until Ctrl-C or RepeatCount exhausted
 	RepeatCount int  // 0 = infinite; N > 0 = run exactly N times
 
+	// RestartServerFunc, when set, is called between stream-mode failure and
+	// standard-mode retry to restart the remote iperf3 server.
+	// numInstances controls how many server instances to start (0 = default).
+	RestartServerFunc func(numInstances int) error
+
 	// Output
 	OutputCSV string
 	Verbose   bool
@@ -126,7 +131,7 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 	}
 
 	// Run iperf test
-	result, iperfVersion, err := runIperfTest(runner, iperfCfg, cfg)
+	result, iperfVersion, err := runIperfTest(runner, iperfCfg, cfg, ctx, cfg.RestartServerFunc)
 
 	// Stop background ping and collect result
 	var pingBaseline, pingLoaded *model.PingResult
@@ -163,15 +168,17 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 	return result, nil
 }
 
-func runIperfTest(runner *iperf.Runner, iperfCfg iperf.IperfConfig, cfg RunnerConfig) (*model.TestResult, string, error) {
+func runIperfTest(runner *iperf.Runner, iperfCfg iperf.IperfConfig, cfg RunnerConfig, ctx context.Context, restartServer func(numInstances int) error) (*model.TestResult, string, error) {
+	onLine := func(line string) {
+		if cfg.Verbose {
+			fmt.Println(line)
+		}
+	}
+
 	version, versionErr := iperf.CheckVersion(iperfCfg.BinaryPath)
 	if versionErr != nil {
 		fmt.Printf("Note: %v — falling back to standard JSON mode (no live intervals)\n", versionErr)
-		result, err := runner.RunWithPipe(context.Background(), iperfCfg, func(line string) {
-			if cfg.Verbose {
-				fmt.Println(line)
-			}
-		})
+		result, err := runner.RunWithPipe(ctx, iperfCfg, onLine)
 		return result, version, err
 	}
 
@@ -187,7 +194,45 @@ func runIperfTest(runner *iperf.Runner, iperfCfg iperf.IperfConfig, cfg RunnerCo
 	}
 
 	testStart := time.Now()
-	result, err := runner.RunWithIntervals(context.Background(), iperfCfg, func(fwd, rev *model.IntervalResult) {
+
+	if iperfCfg.Bidir {
+		result, err := runner.RunBidir(ctx, iperfCfg, func(fwd, rev *model.IntervalResult) {
+			if fwd != nil {
+				ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
+				fmt.Println(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
+			}
+		})
+		if err != nil && isStreamSocketError(err) {
+			// UDP + parallel > 1: skip intermediate -J retry (it will also
+			// EAGAIN) and go straight to multi-instance parallel workaround.
+			if isUDP && iperfCfg.Parallel > 1 {
+				fmt.Printf("Note: stream mode failed — retrying with %d separate instances\n", iperfCfg.Parallel)
+				numInstances := 2 * iperfCfg.Parallel
+				if restartServer != nil {
+					restartServer(numInstances)
+					time.Sleep(time.Second)
+				}
+				result, err = runner.RunBidirParallel(ctx, iperfCfg, iperfCfg.Parallel, func(fwd, rev *model.IntervalResult) {
+					if fwd != nil {
+						ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
+						fmt.Println(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
+					}
+				})
+			} else {
+				fmt.Printf("Note: stream mode failed (%v) — retrying in standard JSON mode\n", err)
+				if restartServer != nil {
+					if rsErr := restartServer(0); rsErr != nil {
+						fmt.Printf("Warning: server restart failed: %v\n", rsErr)
+					}
+					time.Sleep(time.Second)
+				}
+				result, err = runner.RunBidirPipe(ctx, iperfCfg, onLine)
+			}
+		}
+		return result, version, err
+	}
+
+	result, err := runner.RunWithIntervals(ctx, iperfCfg, func(fwd, rev *model.IntervalResult) {
 		ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
 		if rev != nil {
 			fmt.Println(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
@@ -197,18 +242,29 @@ func runIperfTest(runner *iperf.Runner, iperfCfg iperf.IperfConfig, cfg RunnerCo
 	})
 
 	// Fall back to standard -J mode on iperf3 stream-socket errors (UDP EAGAIN bug).
-	// Exception: UDP bidir also fails in -J mode on Windows/Cygwin servers —
-	// surface a helpful error rather than retrying pointlessly.
 	if err != nil && isStreamSocketError(err) {
-		if strings.EqualFold(iperfCfg.Protocol, "udp") && iperfCfg.Bidir {
-			return nil, version, fmt.Errorf("UDP bidirectional mode is not supported by the remote iperf3 server (known Cygwin/Windows limitation); use TCP for bidir, or UDP with Normal/Reverse direction")
-		}
-		fmt.Printf("Note: stream mode failed (%v) — retrying in standard JSON mode\n", err)
-		result, err = runner.RunWithPipe(context.Background(), iperfCfg, func(line string) {
-			if cfg.Verbose {
-				fmt.Println(line)
+		// UDP + parallel > 1: skip intermediate -J retry and go straight
+		// to multi-instance parallel workaround.
+		if isUDP && iperfCfg.Parallel > 1 {
+			fmt.Printf("Note: stream mode failed — retrying with %d separate instances\n", iperfCfg.Parallel)
+			if restartServer != nil {
+				restartServer(iperfCfg.Parallel)
+				time.Sleep(time.Second)
 			}
-		})
+			result, err = runner.RunParallel(ctx, iperfCfg, iperfCfg.Parallel, func(fwd, rev *model.IntervalResult) {
+				ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
+				fmt.Println(ts + "  " + format.FormatInterval(fwd, isUDP))
+			})
+		} else {
+			fmt.Printf("Note: stream mode failed (%v) — retrying in standard JSON mode\n", err)
+			if restartServer != nil {
+				if rsErr := restartServer(0); rsErr != nil {
+					fmt.Printf("Warning: server restart failed: %v\n", rsErr)
+				}
+				time.Sleep(time.Second)
+			}
+			result, err = runner.RunWithPipe(ctx, iperfCfg, onLine)
+		}
 	}
 	return result, version, err
 }
@@ -329,7 +385,7 @@ func (r *RemoteServerRunner) Start() error {
 	}
 
 	if r.cfg.Verbose {
-		fmt.Printf("Starting remote iperf3 server on port %d...\n", port)
+		fmt.Printf("Starting remote iperf3 servers on ports %d, %d...\n", port, port+1)
 	}
 
 	if err := r.mgr.StartServer(r.client, port); err != nil {
@@ -337,9 +393,22 @@ func (r *RemoteServerRunner) Start() error {
 	}
 
 	if r.cfg.Verbose {
-		fmt.Println("Remote server started")
+		fmt.Printf("Remote servers started on ports %d, %d\n", port, port+1)
 	}
 	return nil
+}
+
+// Restart kills any existing iperf3 processes and starts a fresh server.
+// numInstances controls how many server instances to start (0 = default of 2).
+func (r *RemoteServerRunner) Restart(numInstances int) error {
+	if r.client == nil {
+		return fmt.Errorf("not connected")
+	}
+	port := r.cfg.Port
+	if port == 0 {
+		port = 5201
+	}
+	return r.mgr.RestartServer(r.client, port, numInstances)
 }
 
 // Stop stops the remote iperf3 server.

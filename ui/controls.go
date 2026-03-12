@@ -214,14 +214,47 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 
 	result, err := c.runTest(cfg, useStream)
 
-	// If a stream socket error occurred, fall back to standard -J mode.
-	// Exception: UDP bidir also fails in -J mode on Windows/Cygwin servers —
-	// in that case surface a helpful error rather than retrying pointlessly.
-	if err != nil && isStreamSocketError(err) {
-		if strings.EqualFold(cfg.Protocol, "udp") && cfg.Bidir {
-			err = fmt.Errorf("UDP bidirectional mode is not supported by the remote iperf3 server (known Cygwin/Windows limitation); use TCP for bidir, or UDP with Normal/Reverse direction")
-		} else if useStream {
+	// If a stream socket error occurred, restart the remote server (the
+	// failed stream-mode clients may have left the server busy) then fall
+	// back to standard -J mode or multi-instance parallel.
+	if err != nil && isStreamSocketError(err) && useStream {
+		isUDP := strings.EqualFold(cfg.Protocol, "udp")
+		// UDP + parallel > 1: skip intermediate -J retry (it will also
+		// EAGAIN) and go straight to multi-instance parallel workaround.
+		if isUDP && cfg.Parallel > 1 {
+			c.outputView.AppendLine(fmt.Sprintf("Note: stream mode failed, retrying with %d separate instances...", cfg.Parallel))
+			if c.remotePanel.IsConnected() {
+				numInstances := cfg.Parallel
+				if cfg.Bidir {
+					numInstances = 2 * cfg.Parallel
+				}
+				_ = c.remotePanel.RestartServer(numInstances)
+				time.Sleep(time.Second)
+			}
+			isUDPParallel := true
+			testStart := time.Now()
+			intervalCb := func(fwd, rev *model.IntervalResult) {
+				if fwd == nil {
+					return
+				}
+				ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
+				if cfg.Bidir && rev != nil {
+					c.outputView.AppendLine(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDPParallel))
+				} else {
+					c.outputView.AppendLine(ts + "  " + format.FormatInterval(fwd, isUDPParallel))
+				}
+			}
+			if cfg.Bidir {
+				result, err = c.runner.RunBidirParallel(nil, cfg, cfg.Parallel, intervalCb)
+			} else {
+				result, err = c.runner.RunParallel(nil, cfg, cfg.Parallel, intervalCb)
+			}
+		} else {
 			c.outputView.AppendLine("Note: stream mode failed, retrying in standard JSON mode...")
+			if c.remotePanel.IsConnected() {
+				_ = c.remotePanel.RestartServer()
+				time.Sleep(time.Second)
+			}
 			result, err = c.runTest(cfg, false)
 		}
 	}
@@ -331,6 +364,16 @@ func (c *Controls) runTest(cfg iperf.IperfConfig, useStream bool) (*model.TestRe
 		c.outputView.AppendLine(header)
 		c.outputView.AppendLine(strings.Repeat("-", len(header)))
 		testStart := time.Now()
+
+		if cfg.Bidir {
+			return c.runner.RunBidir(nil, cfg, func(fwd, rev *model.IntervalResult) {
+				if fwd != nil {
+					ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
+					c.outputView.AppendLine(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
+				}
+			})
+		}
+
 		return c.runner.RunWithIntervals(nil, cfg, func(fwd, rev *model.IntervalResult) {
 			ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
 			if rev != nil {
@@ -342,6 +385,11 @@ func (c *Controls) runTest(cfg iperf.IperfConfig, useStream bool) (*model.TestRe
 	}
 
 	c.outputView.AppendLine("Falling back to standard JSON mode (no live intervals)")
+	if cfg.Bidir {
+		return c.runner.RunBidirPipe(nil, cfg, func(line string) {
+			c.outputView.AppendLine(line)
+		})
+	}
 	return c.runner.RunWithPipe(nil, cfg, func(line string) {
 		c.outputView.AppendLine(line)
 	})

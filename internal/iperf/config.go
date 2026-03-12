@@ -211,9 +211,7 @@ func (c *IperfConfig) ToArgs(supportsCongestion bool) []string {
 	if c.Reverse {
 		args = append(args, "-R")
 	}
-	if c.Bidir {
-		args = append(args, "--bidir")
-	}
+	// Note: Bidir is handled by RunBidir (two separate processes), not --bidir flag.
 	if bwArg := c.bandwidthPerStreamArg(); bwArg != "" {
 		args = append(args, "-b", bwArg)
 	}

@@ -166,9 +166,11 @@ func (rp *RemotePanel) onConnect() {
 		fyne.Do(func() { portCh <- rp.getPort() })
 		port := <-portCh
 
-		// Always restart the server on connect so we own the bgSession.
-		// This avoids inheriting a stale process we can't control.
-		startErr := rp.srvMgr.RestartServer(client, port)
+		// Only attempt server start if iperf3 is installed.
+		var startErr error
+		if installed {
+			startErr = rp.srvMgr.RestartServer(client, port, 0)
+		}
 
 		fyne.Do(func() {
 			rp.client = client
@@ -182,7 +184,10 @@ func (rp *RemotePanel) onConnect() {
 				rp.installBtn.SetText("Install iperf3")
 			}
 
-			if startErr != nil {
+			if !installed {
+				rp.statusEntry.SetText(fmt.Sprintf("Connected to %s (iperf3 not installed — use Install button)", cfg.Host))
+				rp.startSrvBtn.Disable()
+			} else if startErr != nil {
 				rp.statusEntry.SetText(fmt.Sprintf("Connected to %s (server start failed: %v)", cfg.Host, startErr))
 				rp.startSrvBtn.Enable()
 			} else {
@@ -197,20 +202,29 @@ func (rp *RemotePanel) onConnect() {
 }
 
 // RestartServer kills any stuck iperf3 processes on the remote host and
-// starts a fresh server. Returns nil if no SSH connection is active.
-func (rp *RemotePanel) RestartServer() error {
+// starts a fresh server. numInstances controls how many server instances
+// to start (0 = default of 2).
+func (rp *RemotePanel) RestartServer(numInstances ...int) error {
 	if rp.client == nil {
 		return fmt.Errorf("not connected via SSH")
 	}
 
 	port := rp.getPort()
+	n := 0
+	if len(numInstances) > 0 {
+		n = numInstances[0]
+	}
 
-	if err := rp.srvMgr.RestartServer(rp.client, port); err != nil {
+	if err := rp.srvMgr.RestartServer(rp.client, port, n); err != nil {
 		return err
 	}
 
+	lastPort := port + 1
+	if n > 1 {
+		lastPort = port + n - 1
+	}
 	fyne.Do(func() {
-		rp.statusEntry.SetText(fmt.Sprintf("Server restarted on port %d", port))
+		rp.statusEntry.SetText(fmt.Sprintf("Server restarted on ports %d–%d", port, lastPort))
 		rp.startSrvBtn.Disable()
 		rp.stopSrvBtn.Enable()
 	})
@@ -256,14 +270,14 @@ func (rp *RemotePanel) onStartServer() {
 	rp.statusEntry.SetText("Starting server...")
 
 	go func() {
-		err := rp.srvMgr.RestartServer(rp.client, port)
+		err := rp.srvMgr.RestartServer(rp.client, port, 0)
 		fyne.Do(func() {
 			if err != nil {
 				rp.statusEntry.SetText(fmt.Sprintf("Error: %v", err))
 				rp.startSrvBtn.Enable()
 				return
 			}
-			rp.statusEntry.SetText(fmt.Sprintf("Server running on port %d", port))
+			rp.statusEntry.SetText(fmt.Sprintf("Server running on ports %d, %d", port, port+1))
 			rp.stopSrvBtn.Enable()
 		})
 	}()
@@ -300,14 +314,20 @@ func (rp *RemotePanel) onInstall() {
 	rp.statusEntry.SetText("Installing iperf3...")
 
 	go func() {
-		defer rp.installBtn.Enable()
-
 		if err := rp.client.InstallIperf3(); err != nil {
-			rp.statusEntry.SetText(fmt.Sprintf("Install failed: %v", err))
+			fyne.Do(func() {
+				rp.statusEntry.SetText(fmt.Sprintf("Install failed: %v", err))
+				rp.installBtn.Enable()
+			})
 			return
 		}
 
-		rp.statusEntry.SetText("iperf3 installed successfully")
+		fyne.Do(func() {
+			rp.installBtn.Disable()
+			rp.installBtn.SetText("iperf3 Installed")
+			rp.startSrvBtn.Enable()
+			rp.statusEntry.SetText("iperf3 installed successfully — use Start Server")
+		})
 	}()
 }
 

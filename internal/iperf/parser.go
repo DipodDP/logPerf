@@ -13,9 +13,10 @@ import (
 
 // iperfOutput represents the top-level iperf3 JSON output structure.
 type iperfOutput struct {
-	Start iperfStart `json:"start"`
-	End   iperfEnd   `json:"end"`
-	Error string     `json:"error"`
+	Start     iperfStart     `json:"start"`
+	Intervals []intervalData `json:"intervals"`
+	End       iperfEnd       `json:"end"`
+	Error     string         `json:"error"`
 }
 
 type iperfStart struct {
@@ -360,6 +361,18 @@ func ParseResult(jsonData []byte) (*model.TestResult, error) {
 
 	if out.Error != "" {
 		result.Error = out.Error
+	}
+
+	// Extract intervals from standard -J output.
+	for _, iv := range out.Intervals {
+		fwd := sumToInterval(iv.Sum)
+		if !fwd.Omitted {
+			result.Intervals = append(result.Intervals, *fwd)
+		}
+	}
+	// Derive actual duration from last interval's end time.
+	if len(result.Intervals) > 0 {
+		result.ActualDuration = result.Intervals[len(result.Intervals)-1].TimeEnd
 	}
 
 	fillReverseSummaryFromStreams(result)
