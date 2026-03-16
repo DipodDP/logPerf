@@ -8,7 +8,7 @@ import (
 
 // BuildMainWindow creates and configures the main application window.
 func BuildMainWindow(app fyne.App) fyne.Window {
-	win := app.NewWindow("iperf3 Test Tool")
+	win := app.NewWindow("iperf2 Test Tool")
 
 	configForm := NewConfigForm()
 	remotePanel := NewRemotePanel()

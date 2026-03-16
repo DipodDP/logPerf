@@ -5,10 +5,26 @@ import (
 	"testing"
 )
 
-func validConfig() IperfConfig {
+func validConfig() Config {
 	c := DefaultConfig()
 	c.ServerAddr = "192.168.1.1"
 	return c
+}
+
+func TestDefaultConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Port != 5201 {
+		t.Errorf("expected default port 5201, got %d", cfg.Port)
+	}
+	if cfg.Protocol != "tcp" {
+		t.Errorf("expected default protocol tcp, got %s", cfg.Protocol)
+	}
+	if cfg.Parallel != 1 {
+		t.Errorf("expected default parallel 1, got %d", cfg.Parallel)
+	}
+	if cfg.BinaryPath != "iperf" {
+		t.Errorf("expected default binary 'iperf', got %s", cfg.BinaryPath)
+	}
 }
 
 func TestValidate_BlockSize(t *testing.T) {
@@ -33,50 +49,6 @@ func TestValidate_BlockSize(t *testing.T) {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestToArgs_BlockSize(t *testing.T) {
-	cfg := validConfig()
-	cfg.BlockSize = 65536
-
-	args := cfg.ToArgs(true) // assume congestion supported in tests
-	found := false
-	for i, a := range args {
-		if a == "-l" && i+1 < len(args) && args[i+1] == "65536" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected -l 65536 in args, got %v", args)
-	}
-}
-
-func TestToArgs_NoBlockSize(t *testing.T) {
-	cfg := validConfig()
-
-	args := cfg.ToArgs(true) // assume congestion supported in tests
-	for _, a := range args {
-		if a == "-l" {
-			t.Errorf("should not contain -l when BlockSize is 0, got %v", args)
-		}
-	}
-}
-
-func TestToArgs_UDP(t *testing.T) {
-	cfg := validConfig()
-	cfg.Protocol = "udp"
-
-	args := cfg.ToArgs(true) // assume congestion supported in tests
-	found := false
-	for _, a := range args {
-		if a == "-u" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected -u flag for UDP protocol")
 	}
 }
 
@@ -120,6 +92,8 @@ func TestValidate_Bandwidth(t *testing.T) {
 		{"with K suffix", "500K", false},
 		{"with M suffix", "100M", false},
 		{"with G suffix", "1G", false},
+		{"lowercase m", "100m", false},
+		{"lowercase k", "500k", false},
 		{"invalid suffix", "100X", true},
 		{"letters only", "abc", true},
 		{"with spaces", "100 M", true},
@@ -136,24 +110,195 @@ func TestValidate_Bandwidth(t *testing.T) {
 	}
 }
 
-func TestValidate_Congestion(t *testing.T) {
+func TestValidate_RequiredFields(t *testing.T) {
+	cfg := DefaultConfig()
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for empty server address")
+	}
+	if err := cfg.Validate(); !strings.Contains(err.Error(), "server address") {
+		t.Errorf("expected server address error, got: %v", err)
+	}
+}
+
+func TestValidate_BidirPortRange(t *testing.T) {
+	cfg := validConfig()
+	cfg.Bidir = true
+	cfg.Port = 65530
+	cfg.Parallel = 4
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("expected error for bidir port range overflow")
+	}
+	if err != nil && !strings.Contains(err.Error(), "port range") {
+		t.Errorf("expected port range error, got: %v", err)
+	}
+}
+
+func TestValidate_SSHFallbackRequiresFile(t *testing.T) {
+	cfg := validConfig()
+	cfg.SSHFallback = true
+	cfg.RemoteOutputFile = ""
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("expected error when SSHFallback without RemoteOutputFile")
+	}
+}
+
+func TestPortRangeStr(t *testing.T) {
 	tests := []struct {
-		name       string
-		congestion string
-		wantErr    bool
+		name     string
+		port     int
+		parallel int
+		offset   int
+		want     string
 	}{
-		{"empty (default)", "", false},
-		{"bbr", "bbr", false},
-		{"cubic", "cubic", false},
-		{"with underscore", "bbr_v2", false},
-		{"uppercase", "BBR", true},
-		{"with spaces", "bb r", true},
-		{"starts with number", "2bbr", true},
+		{"single port", 5201, 1, 0, "5201"},
+		{"two ports", 5201, 2, 0, "5201-5202"},
+		{"with offset", 5201, 2, 2, "5203-5204"},
+		{"single with offset", 5201, 1, 3, "5204"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := validConfig()
-			cfg.Congestion = tt.congestion
+			cfg := Config{Port: tt.port, Parallel: tt.parallel}
+			got := cfg.PortRangeStr(tt.offset)
+			if got != tt.want {
+				t.Errorf("PortRangeStr(%d) = %q, want %q", tt.offset, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFwdClientArgs_TCP(t *testing.T) {
+	cfg := validConfig()
+	cfg.Protocol = "tcp"
+	cfg.Duration = 10
+	cfg.Interval = 1
+	args := cfg.fwdClientArgs()
+
+	if !containsArg(args, "-c") {
+		t.Error("expected -c flag")
+	}
+	if containsArg(args, "-u") {
+		t.Error("unexpected -u flag for TCP")
+	}
+	if containsArg(args, "-b") {
+		t.Error("unexpected -b flag for TCP without bandwidth")
+	}
+}
+
+func TestFwdClientArgs_UDP(t *testing.T) {
+	cfg := validConfig()
+	cfg.Protocol = "udp"
+	cfg.Bandwidth = "7M"
+	cfg.Duration = 10
+	cfg.Interval = 1
+	args := cfg.fwdClientArgs()
+
+	if !containsArg(args, "-u") {
+		t.Error("expected -u flag for UDP")
+	}
+	if !containsArg(args, "-b") {
+		t.Error("expected -b flag for UDP with bandwidth")
+	}
+}
+
+func TestFwdServerArgs(t *testing.T) {
+	cfg := validConfig()
+	cfg.Protocol = "udp"
+	cfg.Enhanced = true
+	cfg.Interval = 1
+	args := cfg.fwdServerArgs()
+
+	if !containsArg(args, "-s") {
+		t.Error("expected -s flag")
+	}
+	if !containsArg(args, "-u") {
+		t.Error("expected -u flag")
+	}
+	if !containsArg(args, "-e") {
+		t.Error("expected -e flag for enhanced")
+	}
+}
+
+func TestRemoteServerStartCmd_Unix(t *testing.T) {
+	cfg := validConfig()
+	cfg.Protocol = "udp"
+	cfg.Interval = 1
+	cmd := cfg.remoteServerStartCmd()
+	if !strings.Contains(cmd, "iperf") {
+		t.Error("expected 'iperf' in command")
+	}
+	if !strings.HasSuffix(cmd, "&") {
+		t.Error("expected command to end with &")
+	}
+}
+
+func TestRemoteServerStartCmd_Windows(t *testing.T) {
+	cfg := validConfig()
+	cfg.Protocol = "udp"
+	cfg.IsWindows = true
+	cfg.Interval = 1
+	cmd := cfg.remoteServerStartCmd()
+	if !strings.Contains(cmd, "start /B") {
+		t.Error("expected 'start /B' for Windows")
+	}
+	if !strings.Contains(cmd, "iperf.exe") {
+		t.Error("expected 'iperf.exe' for Windows")
+	}
+}
+
+func TestRemoteServerKillCmd(t *testing.T) {
+	cfg := Config{IsWindows: false}
+	if !strings.Contains(cfg.remoteServerKillCmd(), "pkill") {
+		t.Error("expected pkill for Unix")
+	}
+	cfg.IsWindows = true
+	if !strings.Contains(cfg.remoteServerKillCmd(), "taskkill") {
+		t.Error("expected taskkill for Windows")
+	}
+}
+
+func TestBandwidthPerStreamMbps(t *testing.T) {
+	tests := []struct {
+		bw       string
+		parallel int
+		want     float64
+	}{
+		{"", 1, 0},
+		{"100M", 1, 100},
+		{"100M", 4, 25},
+		{"1G", 2, 500},
+		{"500K", 1, 0.5},
+	}
+	for _, tt := range tests {
+		cfg := Config{Bandwidth: tt.bw, Parallel: tt.parallel}
+		got := cfg.BandwidthPerStreamMbps()
+		if got != tt.want {
+			t.Errorf("BandwidthPerStreamMbps(%q, %d) = %f, want %f", tt.bw, tt.parallel, got, tt.want)
+		}
+	}
+}
+
+func TestConfigValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		modify  func(*Config)
+		wantErr bool
+	}{
+		{"valid", func(c *Config) { c.ServerAddr = "192.168.1.1" }, false},
+		{"valid hostname", func(c *Config) { c.ServerAddr = "server.example.com" }, false},
+		{"empty server", func(c *Config) {}, true},
+		{"invalid server chars", func(c *Config) { c.ServerAddr = "foo; rm -rf /" }, true},
+		{"port too low", func(c *Config) { c.ServerAddr = "1.2.3.4"; c.Port = 0 }, true},
+		{"port too high", func(c *Config) { c.ServerAddr = "1.2.3.4"; c.Port = 70000 }, true},
+		{"bad protocol", func(c *Config) { c.ServerAddr = "1.2.3.4"; c.Protocol = "sctp" }, true},
+		{"zero duration", func(c *Config) { c.ServerAddr = "1.2.3.4"; c.Duration = 0 }, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tt.modify(&cfg)
 			err := cfg.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
@@ -162,117 +307,11 @@ func TestValidate_Congestion(t *testing.T) {
 	}
 }
 
-func TestToArgs_Reverse(t *testing.T) {
-	cfg := validConfig()
-	cfg.Reverse = true
-	args := cfg.ToArgs(true) // assume congestion supported in tests
-	found := false
+func containsArg(args []string, target string) bool {
 	for _, a := range args {
-		if a == "-R" {
-			found = true
+		if a == target {
+			return true
 		}
 	}
-	if !found {
-		t.Errorf("expected -R in args, got %v", args)
-	}
-}
-
-func TestToArgs_Bidir(t *testing.T) {
-	cfg := validConfig()
-	cfg.Bidir = true
-	args := cfg.ToArgs(true) // assume congestion supported in tests
-	// --bidir should NOT be in args — bidir is handled by RunBidir (two processes).
-	for _, a := range args {
-		if a == "--bidir" {
-			t.Errorf("unexpected --bidir in args %v; bidir is handled by RunBidir", args)
-		}
-	}
-}
-
-func TestToArgs_Bandwidth(t *testing.T) {
-	// 100M total / 1 stream = 100000000 bits/sec passed to iperf3
-	cfg := validConfig()
-	cfg.Bandwidth = "100M"
-	cfg.Parallel = 1
-	args := cfg.ToArgs(true)
-	found := false
-	for i, a := range args {
-		if a == "-b" && i+1 < len(args) && args[i+1] == "100000000" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected -b 100000000 in args, got %v", args)
-	}
-}
-
-func TestToArgs_BandwidthDividedByStreams(t *testing.T) {
-	// 50M total / 4 streams = 12500000 bits/sec per stream
-	cfg := validConfig()
-	cfg.Bandwidth = "50M"
-	cfg.Parallel = 4
-	args := cfg.ToArgs(true)
-	found := false
-	for i, a := range args {
-		if a == "-b" && i+1 < len(args) && args[i+1] == "12500000" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected -b 12500000 in args, got %v", args)
-	}
-}
-
-func TestToArgs_Congestion(t *testing.T) {
-	cfg := validConfig()
-	cfg.Congestion = "bbr"
-	args := cfg.ToArgs(true) // assume congestion supported in tests
-	found := false
-	for i, a := range args {
-		if a == "-C" && i+1 < len(args) && args[i+1] == "bbr" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected -C bbr in args, got %v", args)
-	}
-}
-
-func TestToArgs_NoNewFlagsWhenDefault(t *testing.T) {
-	cfg := validConfig()
-	args := cfg.ToArgs(true) // assume congestion supported in tests
-	for _, a := range args {
-		switch a {
-		case "-R", "--bidir", "-b", "-C":
-			t.Errorf("should not contain %s when defaults are used, got %v", a, args)
-		}
-	}
-}
-
-func TestToArgs_CongestionNotSupported(t *testing.T) {
-	cfg := validConfig()
-	cfg.Congestion = "bbr"
-	args := cfg.ToArgs(false) // congestion NOT supported
-	for i, a := range args {
-		if a == "-C" {
-			t.Errorf("should not contain -C when congestion not supported, got %v", args)
-		}
-		if a == "bbr" && i > 0 && args[i-1] == "-C" {
-			t.Errorf("should not contain congestion value when not supported, got %v", args)
-		}
-	}
-}
-
-func TestValidate_RequiredFields(t *testing.T) {
-	cfg := DefaultConfig()
-	// No server address
-	if err := cfg.Validate(); err == nil {
-		t.Error("expected error for empty server address")
-	}
-	if err := cfg.Validate(); !strings.Contains(err.Error(), "server address") {
-		t.Errorf("expected server address error, got: %v", err)
-	}
+	return false
 }

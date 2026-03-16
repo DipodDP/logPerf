@@ -5,7 +5,7 @@ import (
 	"fyne.io/fyne/v2/container"
 )
 
-// OutputView displays live scrolling output from iperf3.
+// OutputView displays live scrolling output from iperf2.
 // Text is selectable and copiable.
 type OutputView struct {
 	text      *ReadOnlyEntry

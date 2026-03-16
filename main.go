@@ -106,7 +106,7 @@ func runRemoteServer(cfg *cli.RunnerConfig) error {
 		return err
 	}
 
-	// Install iperf3 if requested
+	// Install iperf2 if requested
 	if cfg.InstallIperf {
 		if err := runner.Install(); err != nil {
 			return err
@@ -129,9 +129,6 @@ func runRemoteServer(cfg *cli.RunnerConfig) error {
 
 	// Run local test if server address provided
 	if cfg.ServerAddr != "" {
-		cfg.RestartServerFunc = func(numInstances int) error {
-			return runner.Restart(numInstances)
-		}
 		result, err := cli.LocalTestRunner(*cfg)
 		if err != nil {
 			return err

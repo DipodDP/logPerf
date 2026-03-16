@@ -59,17 +59,14 @@ func TestLinuxInstallCommandSelection(t *testing.T) {
 	// Simulate apt-get being available
 	mc.commands["which apt-get"] = nil
 
-	// Create a minimal client-like object for testing
-	// This is a conceptual test since we can't easily mock *Client
-	// but it demonstrates the logic
 	tests := []struct {
-		name        string
-		checkCmd    string
-		expectCmd   string
+		name      string
+		checkCmd  string
+		expectCmd string
 	}{
-		{"apt-get", "which apt-get", "sudo apt-get update && sudo apt-get install -y iperf3"},
-		{"yum", "which yum", "sudo yum install -y iperf3"},
-		{"dnf", "which dnf", "sudo dnf install -y iperf3"},
+		{"apt-get", "which apt-get", "sudo apt-get update && sudo apt-get install -y iperf"},
+		{"yum", "which yum", "sudo yum install -y iperf"},
+		{"dnf", "which dnf", "sudo dnf install -y iperf"},
 	}
 
 	for _, tt := range tests {

@@ -38,28 +38,34 @@ func (c *Client) DetectOS() (OSType, error) {
 	return OSUnknown, fmt.Errorf("could not determine remote OS")
 }
 
-// CheckIperf3Installed checks if iperf3 is available on the remote system.
-func (c *Client) CheckIperf3Installed() (bool, error) {
+// CheckIperfInstalled checks if iperf2 is available on the remote system.
+func (c *Client) CheckIperfInstalled() (bool, error) {
 	// Linux/Mac check
-	_, err := c.RunCommand("which iperf3")
+	_, err := c.RunCommand("which iperf")
 	if err == nil {
 		return true, nil
 	}
 
 	// Windows fallback using PowerShell
-	// Also explicitly check the C:\iperf3 extracted path, 
+	// Also explicitly check the C:\iperf2 extracted path,
 	// since SSH shells sometimes don't reload new PATH variables instantly.
-	winCheckCmd := `powershell -Command "if (Get-Command iperf3 -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path \"C:\iperf3\iperf3.exe\") { exit 0 } else { exit 1 }"`
+	winCheckCmd := `powershell -Command "if (Get-Command iperf -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path \"C:\iperf2\iperf.exe\") { exit 0 } else { exit 1 }"`
 	_, err = c.RunCommand(winCheckCmd)
 	return err == nil, nil
 }
 
-// InstallIperf3 attempts to install iperf3 on the remote system.
+// CheckIperf3Installed is a backward-compatibility alias for CheckIperfInstalled.
+// Deprecated: Use CheckIperfInstalled instead.
+func (c *Client) CheckIperf3Installed() (bool, error) {
+	return c.CheckIperfInstalled()
+}
+
+// InstallIperf attempts to install iperf2 on the remote system.
 // It detects the OS and uses the appropriate package manager.
 // Requires sudo/administrator privileges.
-func (c *Client) InstallIperf3() error {
+func (c *Client) InstallIperf() error {
 	// First check if already installed
-	installed, err := c.CheckIperf3Installed()
+	installed, err := c.CheckIperfInstalled()
 	if err == nil && installed {
 		return nil // Already installed
 	}
@@ -72,7 +78,7 @@ func (c *Client) InstallIperf3() error {
 	// Check for sudo/administrator privileges
 	hasSudo, err := c.hasSudoPrivilege(os)
 	if err != nil || !hasSudo {
-		return fmt.Errorf("requires sudo/administrator privileges to install iperf3")
+		return fmt.Errorf("requires sudo/administrator privileges to install iperf2")
 	}
 
 	var installCmd string
@@ -93,22 +99,28 @@ func (c *Client) InstallIperf3() error {
 
 	if installCmd != "" {
 		if _, err := c.RunCommand(installCmd); err != nil {
-			return fmt.Errorf("install iperf3: %w", err)
+			return fmt.Errorf("install iperf2: %w", err)
 		}
 	}
 
 	// Verify installation
-	if installed, err := c.CheckIperf3Installed(); err != nil || !installed {
-		return fmt.Errorf("iperf3 installation verification failed")
+	if installed, err := c.CheckIperfInstalled(); err != nil || !installed {
+		return fmt.Errorf("iperf2 installation verification failed")
 	}
 
 	return nil
 }
 
+// InstallIperf3 is a backward-compatibility alias for InstallIperf.
+// Deprecated: Use InstallIperf instead.
+func (c *Client) InstallIperf3() error {
+	return c.InstallIperf()
+}
+
 // hasSudoPrivilege checks if the user has sudo/administrator access.
 func (c *Client) hasSudoPrivilege(osType OSType) (bool, error) {
 	if osType == OSWindows {
-		// Windows doesn't use sudo, Winget will handle elevation natively or install per-user
+		// Windows doesn't use sudo, will handle elevation natively or install per-user
 		return true, nil
 	}
 
@@ -117,19 +129,18 @@ func (c *Client) hasSudoPrivilege(osType OSType) (bool, error) {
 	return err == nil, nil
 }
 
-// installLinux returns the command to install iperf3 on Linux.
+// installLinux returns the command to install iperf2 on Linux.
 // Detects the package manager (apt, yum, dnf, apk, pacman).
 func (c *Client) installLinux() (string, error) {
-	// Check which package manager is available
 	managers := []struct {
-		check  string
+		check   string
 		install string
 	}{
-		{"which apt-get", "sudo apt-get update && sudo apt-get install -y iperf3"},
-		{"which yum", "sudo yum install -y iperf3"},
-		{"which dnf", "sudo dnf install -y iperf3"},
-		{"which apk", "sudo apk add iperf3"},
-		{"which pacman", "sudo pacman -S --noconfirm iperf3"},
+		{"which apt-get", "sudo apt-get update && sudo apt-get install -y iperf"},
+		{"which yum", "sudo yum install -y iperf"},
+		{"which dnf", "sudo dnf install -y iperf"},
+		{"which apk", "sudo apk add iperf"},
+		{"which pacman", "sudo pacman -S --noconfirm iperf"},
 	}
 
 	for _, mgr := range managers {
@@ -141,21 +152,18 @@ func (c *Client) installLinux() (string, error) {
 	return "", fmt.Errorf("no supported package manager found (apt, yum, dnf, apk, pacman)")
 }
 
-// installMacOS returns the command to install iperf3 on macOS.
+// installMacOS returns the command to install iperf2 on macOS.
 // Assumes Homebrew is installed.
 func (c *Client) installMacOS() (string, error) {
-	// Check if Homebrew is available
 	if _, err := c.RunCommand("which brew"); err != nil {
-		return "", fmt.Errorf("homebrew not found; please install homebrew or iperf3 manually")
+		return "", fmt.Errorf("homebrew not found; please install homebrew or iperf2 manually")
 	}
-	return "brew install iperf3", nil
+	return "brew install iperf", nil
 }
 
-// installWindows returns the command to install iperf3 on Windows.
-// We explicitly bypass package managers like Chocolatey and Winget because
-// their iperf3 packages are notoriously outdated (v3.1.3) and crash on UDP.
-// Instead, we download and extract a modern, community-maintained build (v3.20).
+// installWindows returns the command to install iperf2 on Windows.
+// Downloads iperf2 from SourceForge and extracts to C:\iperf2.
 func (c *Client) installWindows() (string, error) {
-	psCmd := `powershell -Command "$ProgressPreference = 'SilentlyContinue'; $dir='C:\iperf3'; $zip=\"$env:TEMP\iperf3.zip\"; if (!(Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }; Invoke-WebRequest -Uri 'https://github.com/ar51an/iperf3-win-builds/releases/download/3.20/iperf-3.20-win64.zip' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dir -Force; Remove-Item -Path $zip -Force; $path=[Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine); if ($path -notmatch [regex]::Escape($dir)) { [Environment]::SetEnvironmentVariable('Path', $path + ';' + $dir, [EnvironmentVariableTarget]::Machine) }"`
+	psCmd := `powershell -Command "$ProgressPreference = 'SilentlyContinue'; $dir='C:\iperf2'; $zip=\"$env:TEMP\iperf2.zip\"; if (!(Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }; Invoke-WebRequest -Uri 'https://sourceforge.net/projects/iperf2/files/iperf-2.2.1-win64.zip/download' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dir -Force; Remove-Item -Path $zip -Force; $path=[Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine); if ($path -notmatch [regex]::Escape($dir)) { [Environment]::SetEnvironmentVariable('Path', $path + ';' + $dir, [EnvironmentVariableTarget]::Machine) }"`
 	return psCmd, nil
 }

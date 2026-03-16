@@ -15,7 +15,7 @@ type PingResult struct {
 	MaxMs       float64
 }
 
-// IntervalResult holds a single interval measurement from an iperf3 test.
+// IntervalResult holds a single interval measurement from an iperf test.
 type IntervalResult struct {
 	TimeStart    float64 // seconds from test start
 	TimeEnd      float64
@@ -27,7 +27,7 @@ type IntervalResult struct {
 	LostPercent  float64 // UDP only
 	JitterMs     float64 // UDP only
 	Omitted      bool
-	StreamID     int // iperf3 stream/socket ID; 0 = aggregate/unknown
+	StreamID     int // iperf stream/socket ID; 0 = aggregate/unknown
 }
 
 // BandwidthMbps returns the interval bandwidth in Mbps.
@@ -43,7 +43,7 @@ func (r *IntervalResult) TransferMB() float64 {
 // StreamResult holds per-stream throughput data.
 type StreamResult struct {
 	ID          int
-	Socket      int // iperf3 socket ID; used for server-side data matching
+	Socket      int // iperf socket ID; used for server-side data matching
 	SentBps     float64
 	ReceivedBps float64
 	Retransmits int
@@ -64,14 +64,14 @@ func (s *StreamResult) ReceivedMbps() float64 {
 	return s.ReceivedBps / 1_000_000
 }
 
-// TestResult holds the parsed output of a single iperf3 test run.
+// TestResult holds the parsed output of a single iperf test run.
 type TestResult struct {
 	Timestamp     time.Time
 	ServerAddr    string
 	Port          int
 	Parallel      int
 	Duration      int
-	BlockSize     int // -l buffer/datagram size in bytes; 0 = iperf3 default
+	BlockSize     int // -l buffer/datagram size in bytes; 0 = iperf default
 	Interval      int
 	Protocol      string
 	MeasurementID string // e.g. "20260218-163958-01"; empty = not set

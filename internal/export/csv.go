@@ -103,7 +103,7 @@ func WriteCSV(path string, results []model.TestResult) error {
 			actualDurStr = fmt.Sprintf("%.1f", actualDur)
 		}
 
-		// Block size: empty when 0 (iperf3 default)
+		// Block size: empty when 0 (iperf default)
 		blockSize := ""
 		if r.BlockSize > 0 {
 			blockSize = strconv.Itoa(r.BlockSize)

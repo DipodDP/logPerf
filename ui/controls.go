@@ -165,10 +165,10 @@ func (c *Controls) onStart() {
 	}()
 }
 
-// runOnce executes a single iperf3 measurement and returns true if the repeat
+// runOnce executes a single iperf2 measurement and returns true if the repeat
 // loop should continue, false if it should stop.
 func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
-	c.outputView.AppendLine(fmt.Sprintf("Starting iperf3 test to %s:%d ...", cfg.ServerAddr, cfg.Port))
+	c.outputView.AppendLine(fmt.Sprintf("Starting iperf2 test to %s:%d ...", cfg.ServerAddr, cfg.Port))
 
 	ctx := context.Background()
 
@@ -203,73 +203,61 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 		}()
 	}
 
-	iperfVersion, versionErr := iperf.CheckVersion(cfg.BinaryPath)
-	useStream := versionErr == nil
+	iperfVersion, _ := iperf.CheckVersion(cfg.BinaryPath)
 
-	// Check congestion control support
-	supportsCongestion := iperf.SupportsCongestionControl(cfg.BinaryPath)
-	if cfg.Congestion != "" && !supportsCongestion {
-		c.outputView.AppendLine("Warning: Congestion control not supported on this platform, ignoring -C flag")
+	// Print interval header
+	isUDP := strings.EqualFold(cfg.Protocol, "udp")
+	var header string
+	if cfg.Bidir {
+		header = "Time      " + format.FormatBidirIntervalHeader(isUDP)
+	} else {
+		header = "Time      " + format.FormatIntervalHeader(isUDP)
 	}
+	c.outputView.AppendLine("")
+	c.outputView.AppendLine(header)
+	c.outputView.AppendLine(strings.Repeat("-", len(header)))
 
-	result, err := c.runTest(cfg, useStream)
-
-	// If a stream socket error occurred, restart the remote server (the
-	// failed stream-mode clients may have left the server busy) then fall
-	// back to standard -J mode or multi-instance parallel.
-	if err != nil && isStreamSocketError(err) && useStream {
-		isUDP := strings.EqualFold(cfg.Protocol, "udp")
-		// UDP + parallel > 1: skip intermediate -J retry (it will also
-		// EAGAIN) and go straight to multi-instance parallel workaround.
-		if isUDP && cfg.Parallel > 1 {
-			c.outputView.AppendLine(fmt.Sprintf("Note: stream mode failed, retrying with %d separate instances...", cfg.Parallel))
-			if c.remotePanel.IsConnected() {
-				numInstances := cfg.Parallel
-				if cfg.Bidir {
-					numInstances = 2 * cfg.Parallel
-				}
-				_ = c.remotePanel.RestartServer(numInstances)
-				time.Sleep(time.Second)
-			}
-			isUDPParallel := true
-			testStart := time.Now()
-			intervalCb := func(fwd, rev *model.IntervalResult) {
-				if fwd == nil {
-					return
-				}
-				ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
-				if cfg.Bidir && rev != nil {
-					c.outputView.AppendLine(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDPParallel))
-				} else {
-					c.outputView.AppendLine(ts + "  " + format.FormatInterval(fwd, isUDPParallel))
-				}
-			}
-			if cfg.Bidir {
-				result, err = c.runner.RunBidirParallel(nil, cfg, cfg.Parallel, intervalCb)
-			} else {
-				result, err = c.runner.RunParallel(nil, cfg, cfg.Parallel, intervalCb)
-			}
+	testStart := time.Now()
+	onInterval := func(fwd, rev *model.IntervalResult) {
+		if fwd == nil {
+			return
+		}
+		ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
+		if cfg.Bidir && rev != nil {
+			c.outputView.AppendLine(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
 		} else {
-			c.outputView.AppendLine("Note: stream mode failed, retrying in standard JSON mode...")
-			if c.remotePanel.IsConnected() {
-				_ = c.remotePanel.RestartServer()
-				time.Sleep(time.Second)
-			}
-			result, err = c.runTest(cfg, false)
+			c.outputView.AppendLine(ts + "  " + format.FormatInterval(fwd, isUDP))
 		}
 	}
 
+	// Dispatch based on direction
+	var result *model.TestResult
+	var err error
+	if cfg.Bidir {
+		result, err = c.runner.RunBidir(ctx, cfg, nil, onInterval)
+	} else if cfg.Reverse {
+		result, err = c.runner.RunReverse(ctx, cfg, nil, onInterval)
+	} else {
+		result, err = c.runner.RunForward(ctx, cfg, nil, onInterval)
+	}
+
 	// If the test failed to reach the server and we have an SSH connection,
-	// start (or restart) the remote iperf3 and retry once.
+	// start (or restart) the remote iperf2 and retry once.
 	if err != nil && isServerUnreachable(err) {
 		if c.remotePanel.IsConnected() {
-			c.outputView.AppendLine("Server not responding, starting remote iperf3...")
+			c.outputView.AppendLine("Server not responding, starting remote iperf2...")
 			if restartErr := c.remotePanel.RestartServer(); restartErr != nil {
 				c.outputView.AppendLine(fmt.Sprintf("Start failed: %v", restartErr))
 			} else {
 				c.outputView.AppendLine("Server started, retrying test...")
 				time.Sleep(time.Second)
-				result, err = c.runTest(cfg, useStream)
+				if cfg.Bidir {
+					result, err = c.runner.RunBidir(ctx, cfg, nil, onInterval)
+				} else if cfg.Reverse {
+					result, err = c.runner.RunReverse(ctx, cfg, nil, onInterval)
+				} else {
+					result, err = c.runner.RunForward(ctx, cfg, nil, onInterval)
+				}
 			}
 		} else {
 			c.outputView.AppendLine("Tip: connect via SSH in the Remote panel, then retry — the server will be started automatically.")
@@ -316,13 +304,7 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 	}
 
 	// Set config echo fields on the successful result.
-	// Always override with config values — parsed values may be empty on
-	// partial runs (e.g. connection refused after start event).
 	cfg.ApplyToResult(result, "GUI")
-	// Only set congestion if it was actually used (platform supports it)
-	if supportsCongestion {
-		result.Congestion = cfg.Congestion
-	}
 	result.LocalHostname = hostname
 	result.LocalIP = localIP
 	result.IperfVersion = iperfVersion
@@ -333,13 +315,8 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 	}
 	result.MeasurementID = export.NextMeasurementID(result.Timestamp)
 
-	if useStream {
-		c.outputView.AppendLine("")
-		c.outputView.AppendLine(format.FormatResult(result))
-	} else {
-		c.outputView.Clear()
-		c.outputView.AppendLine(format.FormatResult(result))
-	}
+	c.outputView.AppendLine("")
+	c.outputView.AppendLine(format.FormatResult(result))
 
 	c.autoSave(result)
 
@@ -347,52 +324,6 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 	cont := c.repeatOn && !c.stopRepeat
 	c.mu.Unlock()
 	return cont
-}
-
-// runTest executes a single iperf3 test, printing live output along the way.
-func (c *Controls) runTest(cfg iperf.IperfConfig, useStream bool) (*model.TestResult, error) {
-	if useStream {
-		isUDP := strings.EqualFold(cfg.Protocol, "udp")
-		var header string
-		if cfg.Bidir {
-			header = "Time      " + format.FormatBidirIntervalHeader(isUDP)
-		} else {
-			header = "Time      " + format.FormatIntervalHeader(isUDP)
-		}
-		c.outputView.AppendLine("")
-		c.outputView.AppendLine("=== Client-Side Results ===")
-		c.outputView.AppendLine(header)
-		c.outputView.AppendLine(strings.Repeat("-", len(header)))
-		testStart := time.Now()
-
-		if cfg.Bidir {
-			return c.runner.RunBidir(nil, cfg, func(fwd, rev *model.IntervalResult) {
-				if fwd != nil {
-					ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
-					c.outputView.AppendLine(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
-				}
-			})
-		}
-
-		return c.runner.RunWithIntervals(nil, cfg, func(fwd, rev *model.IntervalResult) {
-			ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
-			if rev != nil {
-				c.outputView.AppendLine(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
-			} else {
-				c.outputView.AppendLine(ts + "  " + format.FormatInterval(fwd, isUDP))
-			}
-		})
-	}
-
-	c.outputView.AppendLine("Falling back to standard JSON mode (no live intervals)")
-	if cfg.Bidir {
-		return c.runner.RunBidirPipe(nil, cfg, func(line string) {
-			c.outputView.AppendLine(line)
-		})
-	}
-	return c.runner.RunWithPipe(nil, cfg, func(line string) {
-		c.outputView.AppendLine(line)
-	})
 }
 
 func isServerUnreachable(err error) bool {
@@ -403,15 +334,6 @@ func isServerUnreachable(err error) bool {
 		strings.Contains(msg, "timed out") ||
 		strings.Contains(msg, "Operation timed out") ||
 		strings.Contains(msg, "Connection reset by peer")
-}
-
-// isStreamSocketError returns true for iperf3 errors that are specific to
-// --json-stream mode and indicate a fallback to standard -J mode is needed.
-// These are not server-unreachable errors; they are iperf3 UDP/socket bugs.
-func isStreamSocketError(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "unable to read from stream socket") ||
-		strings.Contains(msg, "unable to receive control message")
 }
 
 // onStop is always called on the UI thread (button tap handler).

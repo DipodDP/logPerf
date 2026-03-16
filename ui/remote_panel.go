@@ -71,7 +71,7 @@ func NewRemotePanel() *RemotePanel {
 	rp.disconnectBtn = widget.NewButton("Disconnect SSH", rp.onDisconnect)
 	rp.disconnectBtn.Disable()
 
-	rp.installBtn = widget.NewButton("Install iperf3", rp.onInstall)
+	rp.installBtn = widget.NewButton("Install iperf2", rp.onInstall)
 	rp.installBtn.Disable()
 
 	rp.startSrvBtn = widget.NewButton("Start Server", rp.onStartServer)
@@ -158,15 +158,15 @@ func (rp *RemotePanel) onConnect() {
 			return
 		}
 
-		// Check if iperf3 itself is already installed
-		installed, _ := client.CheckIperf3Installed()
+		// Check if iperf2 is already installed
+		installed, _ := client.CheckIperfInstalled()
 
 		// Read the configured port on the UI thread, then start the server.
 		portCh := make(chan int, 1)
 		fyne.Do(func() { portCh <- rp.getPort() })
 		port := <-portCh
 
-		// Only attempt server start if iperf3 is installed.
+		// Only attempt server start if iperf2 is installed.
 		var startErr error
 		if installed {
 			startErr = rp.srvMgr.RestartServer(client, port, 0)
@@ -178,14 +178,14 @@ func (rp *RemotePanel) onConnect() {
 
 			if installed {
 				rp.installBtn.Disable()
-				rp.installBtn.SetText("iperf3 Installed")
+				rp.installBtn.SetText("iperf2 Installed")
 			} else {
 				rp.installBtn.Enable()
-				rp.installBtn.SetText("Install iperf3")
+				rp.installBtn.SetText("Install iperf2")
 			}
 
 			if !installed {
-				rp.statusEntry.SetText(fmt.Sprintf("Connected to %s (iperf3 not installed — use Install button)", cfg.Host))
+				rp.statusEntry.SetText(fmt.Sprintf("Connected to %s (iperf2 not installed — use Install button)", cfg.Host))
 				rp.startSrvBtn.Disable()
 			} else if startErr != nil {
 				rp.statusEntry.SetText(fmt.Sprintf("Connected to %s (server start failed: %v)", cfg.Host, startErr))
@@ -201,7 +201,7 @@ func (rp *RemotePanel) onConnect() {
 	}()
 }
 
-// RestartServer kills any stuck iperf3 processes on the remote host and
+// RestartServer kills any stuck iperf2 processes on the remote host and
 // starts a fresh server. numInstances controls how many server instances
 // to start (0 = default of 2).
 func (rp *RemotePanel) RestartServer(numInstances ...int) error {
@@ -241,7 +241,7 @@ func (rp *RemotePanel) Host() string {
 	return rp.hostEntry.Text
 }
 
-// getPort returns the configured iperf3 server port, or 5201 if invalid.
+// getPort returns the configured iperf2 server port, or 5201 if invalid.
 func (rp *RemotePanel) getPort() int {
 	return parsePort(rp.portEntry.Text, 5201)
 }
@@ -311,10 +311,10 @@ func (rp *RemotePanel) onInstall() {
 	}
 
 	rp.installBtn.Disable()
-	rp.statusEntry.SetText("Installing iperf3...")
+	rp.statusEntry.SetText("Installing iperf2...")
 
 	go func() {
-		if err := rp.client.InstallIperf3(); err != nil {
+		if err := rp.client.InstallIperf(); err != nil {
 			fyne.Do(func() {
 				rp.statusEntry.SetText(fmt.Sprintf("Install failed: %v", err))
 				rp.installBtn.Enable()
@@ -324,9 +324,9 @@ func (rp *RemotePanel) onInstall() {
 
 		fyne.Do(func() {
 			rp.installBtn.Disable()
-			rp.installBtn.SetText("iperf3 Installed")
+			rp.installBtn.SetText("iperf2 Installed")
 			rp.startSrvBtn.Enable()
-			rp.statusEntry.SetText("iperf3 installed successfully — use Start Server")
+			rp.statusEntry.SetText("iperf2 installed successfully — use Start Server")
 		})
 	}()
 }

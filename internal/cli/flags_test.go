@@ -6,11 +6,9 @@ import (
 )
 
 func TestParseFlags_NoArgs(t *testing.T) {
-	// Save original args
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 
-	// Simulate no arguments
 	os.Args = []string{"iperf-tool"}
 
 	cfg, err := ParseFlags()
@@ -62,6 +60,21 @@ func TestParseFlags_LocalTest(t *testing.T) {
 	}
 	if cfg.Duration != 30 {
 		t.Errorf("Duration = %d, want 30", cfg.Duration)
+	}
+}
+
+func TestParseFlags_DefaultBinary(t *testing.T) {
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	os.Args = []string{"iperf-tool", "-server", "192.168.1.1"}
+
+	cfg, err := ParseFlags()
+	if err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+	if cfg.BinaryPath != "iperf" {
+		t.Errorf("BinaryPath = %q, want iperf", cfg.BinaryPath)
 	}
 }
 
@@ -160,21 +173,6 @@ func TestParseFlags_BandwidthFlag(t *testing.T) {
 	}
 	if cfg.Bandwidth != "100M" {
 		t.Errorf("Bandwidth = %q, want 100M", cfg.Bandwidth)
-	}
-}
-
-func TestParseFlags_CongestionFlag(t *testing.T) {
-	origArgs := os.Args
-	defer func() { os.Args = origArgs }()
-
-	os.Args = []string{"iperf-tool", "-server", "10.0.0.1", "-C", "bbr"}
-
-	cfg, err := ParseFlags()
-	if err != nil {
-		t.Fatalf("ParseFlags() error = %v", err)
-	}
-	if cfg.Congestion != "bbr" {
-		t.Errorf("Congestion = %q, want bbr", cfg.Congestion)
 	}
 }
 
