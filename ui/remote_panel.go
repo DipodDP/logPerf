@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -419,7 +420,7 @@ func (rp *RemotePanel) onSetupLocalSSH() {
 
 	content := container.NewVBox(
 		widget.NewLabel("This will install OpenSSH Server, configure sshd,\nand open firewall ports 22 and 5201.\nRequires Administrator privileges."),
-		widget.NewLabel("Public Key (optional)"),
+		widget.NewLabel("Public Key (optional — default: ~/.ssh/id_*.pub)"),
 		keyEntry,
 	)
 
@@ -431,7 +432,16 @@ func (rp *RemotePanel) onSetupLocalSSH() {
 		rp.statusEntry.SetText("Setting up local SSH server...")
 
 		go func() {
-			out, err := internalssh.SetupWindowsSSHLocal(keyEntry.Text)
+			pubKey := strings.TrimSpace(keyEntry.Text)
+			if pubKey == "" {
+				if path, k, kerr := internalssh.DefaultPublicKey(); kerr == nil {
+					pubKey = k
+					fyne.Do(func() {
+						rp.statusEntry.SetText(fmt.Sprintf("Using default SSH public key: %s", path))
+					})
+				}
+			}
+			out, err := internalssh.SetupWindowsSSHLocal(pubKey)
 			fyne.Do(func() {
 				rp.setupLocalSSHBtn.Enable()
 				if err != nil {
@@ -457,7 +467,7 @@ func (rp *RemotePanel) onSetupRemoteSSH() {
 
 	content := container.NewVBox(
 		widget.NewLabel("This will configure OpenSSH Server on the remote\nWindows host: install sshd, set firewall rules\nfor SSH (22) and iperf2 (5201 TCP+UDP)."),
-		widget.NewLabel("Public Key (optional)"),
+		widget.NewLabel("Public Key (optional — default: ~/.ssh/id_*.pub)"),
 		keyEntry,
 	)
 
@@ -469,7 +479,16 @@ func (rp *RemotePanel) onSetupRemoteSSH() {
 		rp.statusEntry.SetText("Setting up remote SSH server...")
 
 		go func() {
-			out, err := internalssh.SetupWindowsSSHRemote(rp.client, keyEntry.Text)
+			pubKey := strings.TrimSpace(keyEntry.Text)
+			if pubKey == "" {
+				if path, k, kerr := internalssh.DefaultPublicKey(); kerr == nil {
+					pubKey = k
+					fyne.Do(func() {
+						rp.statusEntry.SetText(fmt.Sprintf("Using default SSH public key: %s", path))
+					})
+				}
+			}
+			out, err := internalssh.SetupWindowsSSHRemote(rp.client, pubKey)
 			fyne.Do(func() {
 				rp.setupRemoteSSHBtn.Enable()
 				if err != nil {

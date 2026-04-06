@@ -13,6 +13,27 @@ import (
 //go:embed setup_windows_ssh.ps1
 var setupWindowsSSHScript string
 
+// DefaultPublicKey returns the contents of the user's default SSH public key,
+// searching ~/.ssh for id_ed25519.pub, id_rsa.pub, id_ecdsa.pub in that order.
+// Returns the path it loaded from and the trimmed key contents. If no key is
+// found, returns an error.
+func DefaultPublicKey() (path string, key string, err error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", fmt.Errorf("locate home dir: %w", err)
+	}
+	candidates := []string{"id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"}
+	for _, name := range candidates {
+		p := filepath.Join(home, ".ssh", name)
+		data, err := os.ReadFile(p)
+		if err == nil {
+			return p, strings.TrimSpace(string(data)), nil
+		}
+	}
+	return "", "", fmt.Errorf("no default SSH public key found in %s/.ssh (tried %s)",
+		home, strings.Join(candidates, ", "))
+}
+
 // SetupWindowsSSHLocal runs the embedded PowerShell script locally to install
 // and configure OpenSSH Server on the current Windows machine.
 // pubKey is optional; if non-empty it is passed to the script for key-based auth.
@@ -107,15 +128,32 @@ func SetupWindowsSSHRemote(client *Client, pubKey string) (string, error) {
 	if pubKey != "" {
 		log.WriteString("[4/4] Configuring SSH public key...\n")
 		// For admin users, write to ProgramData\ssh\administrators_authorized_keys
+		// Compare by the base64 key body (field 2) to ignore comment/whitespace
+		// differences, so re-running setup doesn't duplicate entries.
+		fields := strings.Fields(pubKey)
+		var keyBody string
+		if len(fields) >= 2 {
+			keyBody = fields[1]
+		} else {
+			keyBody = strings.TrimSpace(pubKey)
+		}
 		escapedKey := strings.ReplaceAll(pubKey, "'", "''")
-		keyCmd := fmt.Sprintf(`powershell -Command "
-			$sshDir = \"$env:ProgramData\ssh\"
-			$authFile = \"$sshDir\administrators_authorized_keys\"
-			if (!(Test-Path $sshDir)) { New-Item -ItemType Directory -Force -Path $sshDir | Out-Null }
-			Add-Content -Path $authFile -Value '%s'
-			icacls.exe $authFile /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
-			Write-Output 'key added to administrators_authorized_keys'
-		"`, escapedKey)
+		escapedBody := strings.ReplaceAll(keyBody, "'", "''")
+		// Single-line PowerShell: multi-line scripts passed through SSH shell
+		// escaping can be eaten silently by the remote parser, so we keep the
+		// whole pipeline on one line separated by semicolons.
+		psScript := fmt.Sprintf(
+			`$sshDir=\"$env:ProgramData\ssh\"; `+
+				`$authFile=\"$sshDir\administrators_authorized_keys\"; `+
+				`if (!(Test-Path $sshDir)) { New-Item -ItemType Directory -Force -Path $sshDir | Out-Null }; `+
+				`if (!(Test-Path $authFile)) { New-Item -ItemType File -Force -Path $authFile | Out-Null }; `+
+				`$body='%s'; `+
+				`$already = Select-String -Path $authFile -SimpleMatch -Pattern $body -Quiet; `+
+				`if ($already) { Write-Output 'key already present, skipping' } `+
+				`else { Add-Content -Path $authFile -Value '%s'; Write-Output 'key added to administrators_authorized_keys' }; `+
+				`icacls.exe $authFile /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null`,
+			escapedBody, escapedKey)
+		keyCmd := `powershell -NoProfile -Command "` + psScript + `"`
 		out, err = client.RunCommand(keyCmd)
 		if err != nil {
 			log.WriteString(fmt.Sprintf("  Failed: %v\n", err))
