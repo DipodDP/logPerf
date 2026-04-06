@@ -58,9 +58,15 @@ func (m *ServerManager) start(client *Client, port, numInstances int) error {
 	// 1. Check if we are on Windows (cmd.exe is present)
 	if _, err := client.RunCommand("cmd.exe /c echo %OS%"); err == nil {
 		for i, p := range ports {
+			// TCP listener
 			taskName := fmt.Sprintf("iperf2srv%d", i)
-			if err := m.startWindows(client, p, taskName); err != nil {
-				return fmt.Errorf("start server instance %d on port %d: %w", i, p, err)
+			if err := m.startWindows(client, p, taskName, ""); err != nil {
+				return fmt.Errorf("start TCP server instance %d on port %d: %w", i, p, err)
+			}
+			// UDP listener
+			taskNameUDP := fmt.Sprintf("iperf2srv%d_udp", i)
+			if err := m.startWindows(client, p, taskNameUDP, "-u"); err != nil {
+				return fmt.Errorf("start UDP server instance %d on port %d: %w", i, p, err)
 			}
 		}
 		addWindowsFirewallRules(client, ports...)
@@ -70,10 +76,13 @@ func (m *ServerManager) start(client *Client, port, numInstances int) error {
 		return nil
 	}
 
-	// 2. Unix daemon mode.
+	// 2. Unix daemon mode — start both TCP and UDP listeners.
 	for _, p := range ports {
 		if _, err := client.RunCommand(fmt.Sprintf("iperf -s -p %d -D", p)); err != nil {
-			return fmt.Errorf("start remote iperf2 server on port %d: %w", p, err)
+			return fmt.Errorf("start remote iperf2 TCP server on port %d: %w", p, err)
+		}
+		if _, err := client.RunCommand(fmt.Sprintf("iperf -s -u -p %d -D", p)); err != nil {
+			return fmt.Errorf("start remote iperf2 UDP server on port %d: %w", p, err)
 		}
 	}
 	time.Sleep(500 * time.Millisecond)
@@ -89,24 +98,17 @@ func (m *ServerManager) start(client *Client, port, numInstances int) error {
 	return nil
 }
 
-// startWindows starts a single iperf2 instance on the given port via schtasks
-// (with WMI fallback). taskName must be unique per instance.
-func (m *ServerManager) startWindows(client *Client, port int, taskName string) error {
-	createRun := fmt.Sprintf(
-		`schtasks /create /tn "%s" /tr "cmd.exe /c cd /d C:\iperf2 && iperf.exe -s -p %d" /sc once /st 00:00 /f && schtasks /run /tn "%s"`,
-		taskName, port, taskName,
-	)
-	if _, err := client.RunCommand(createRun); err == nil {
-		time.Sleep(1 * time.Second)
-		if isListening(client, port) == nil {
-			return nil
-		}
+// startWindows starts a single iperf2 instance on the given port via WMI.
+// WMI is used because schtasks creates tasks in "Interactive only" logon mode
+// which does not run under non-interactive SSH sessions.
+func (m *ServerManager) startWindows(client *Client, port int, taskName string, extraFlags string) error {
+	flags := fmt.Sprintf("-s -p %d", port)
+	if extraFlags != "" {
+		flags += " " + extraFlags
 	}
-
-	// Fallback: WMI
-	wmiCmd := fmt.Sprintf(`powershell -Command "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList 'cmd.exe /c cd /d C:\iperf2 && iperf.exe -s -p %d'"`, port)
+	wmiCmd := fmt.Sprintf(`powershell -Command "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList 'iperf.exe %s'"`, flags)
 	if _, err := client.RunCommand(wmiCmd); err != nil {
-		return fmt.Errorf("start remote iperf2 server on port %d (Windows WMI fallback): %w", port, err)
+		return fmt.Errorf("start remote iperf2 server on port %d: %w", port, err)
 	}
 	time.Sleep(1 * time.Second)
 	if err := isListening(client, port); err != nil {
@@ -116,28 +118,29 @@ func (m *ServerManager) startWindows(client *Client, port int, taskName string) 
 }
 
 // StopServer stops the remote iperf2 server process.
+// It always attempts to kill iperf2 regardless of locally tracked state,
+// since the manager is re-created on each CLI invocation.
 func (m *ServerManager) StopServer(client *Client) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if !m.running {
-		return fmt.Errorf("iperf2 server is not running")
+	if client == nil {
+		return fmt.Errorf("SSH client is required to stop the server")
 	}
 
+	m.mu.Lock()
 	port := m.port
 	n := m.numInstances
 	if n < 2 {
 		n = 2
 	}
+	m.running = false
+	m.port = 0
+	m.numInstances = 0
+	m.mu.Unlock()
 
-	// Unix
+	// Try Unix kill first
 	if _, err := client.RunCommand("pkill -f 'iperf -s'"); err != nil {
 		if _, err2 := client.RunCommand("killall iperf"); err2 != nil {
 			// Windows
-			client.RunCommand("taskkill /IM iperf.exe")
-			for i := 0; i < n; i++ {
-				client.RunCommand(fmt.Sprintf(`schtasks /delete /tn "iperf2srv%d" /f`, i))
-			}
+			client.RunCommand("taskkill /IM iperf.exe /F")
 			ports := make([]int, n)
 			for i := range ports {
 				ports[i] = port + i
@@ -146,9 +149,6 @@ func (m *ServerManager) StopServer(client *Client) error {
 		}
 	}
 
-	m.running = false
-	m.port = 0
-	m.numInstances = 0
 	return nil
 }
 
@@ -222,14 +222,10 @@ func (m *ServerManager) RestartServer(client *Client, port, numInstances int) er
 
 	// Force-kill any stale processes and clean up old firewall rules.
 	client.RunCommand("pkill -f 'iperf -s'")
-	client.RunCommand("taskkill /IM iperf.exe")
-	// Clean up schtasks for the maximum of old and new instance counts.
+	client.RunCommand("taskkill /IM iperf.exe /F")
 	cleanN := oldN
 	if numInstances > cleanN {
 		cleanN = numInstances
-	}
-	for i := 0; i < cleanN; i++ {
-		client.RunCommand(fmt.Sprintf(`schtasks /delete /tn "iperf2srv%d" /f`, i))
 	}
 	oldPorts := make([]int, cleanN)
 	for i := range oldPorts {

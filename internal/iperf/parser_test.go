@@ -46,6 +46,19 @@ const sampleFabricatedServerReport = `[  1]  0.00-10.00 sec  8.75 MBytes  7.34 M
 [  1]  0.00-10.00 sec  8.75 MBytes  7.34 Mbits/sec   0.000 ms    0/6250 (0%)
 WARNING: did not receive ack of last datagram after 10 tries.`
 
+// sampleFabricatedNoWarning simulates the Tailscale case: ACK arrives but
+// jitter is zeroed (fabricated), and no WARNING is printed.
+const sampleFabricatedNoWarning = `[  1]  0.00-5.00 sec  6.25 MBytes  10.5 Mbits/sec
+[  1] Sent 4461 datagrams
+[  2]  0.00-5.00 sec  6.25 MBytes  10.5 Mbits/sec
+[  2] Sent 4461 datagrams
+[  2] Server Report:
+[ ID] Interval       Transfer     Bandwidth        Jitter   Lost/Total Datagrams
+[  2]  0.00-4.11 sec  5.50 MBytes  11.2 Mbits/sec   0.000 ms 538/4460 (0%)
+[  1] Server Report:
+[ ID] Interval       Transfer     Bandwidth        Jitter   Lost/Total Datagrams
+[  1]  0.00-4.12 sec  5.50 MBytes  11.2 Mbits/sec   0.000 ms 536/4460 (0%)`
+
 const sampleTCPOutput = `------------------------------------------------------------
 Client connecting to 100.89.230.34, TCP port 5201
 TCP window size: 0.06 MByte (default)
@@ -174,6 +187,14 @@ func TestParseNoData(t *testing.T) {
 
 func TestParseFabricatedServerReport(t *testing.T) {
 	status := ValidateServerReport(sampleFabricatedServerReport)
+	if status != ServerReportFabricated {
+		t.Errorf("status = %d, want ServerReportFabricated (%d)", status, ServerReportFabricated)
+	}
+}
+
+func TestValidateServerReport_FabricatedNoWarning(t *testing.T) {
+	// Tailscale case: ACK arrives but jitter is 0.000 ms — no WARNING printed.
+	status := ValidateServerReport(sampleFabricatedNoWarning)
 	if status != ServerReportFabricated {
 		t.Errorf("status = %d, want ServerReportFabricated (%d)", status, ServerReportFabricated)
 	}
@@ -415,6 +436,92 @@ func TestInsertSorted(t *testing.T) {
 	s = insertSorted(s, 2.0)
 	if len(s) != 3 || s[0] != 1.0 || s[1] != 2.0 || s[2] != 3.0 {
 		t.Errorf("insertSorted result = %v, want [1 2 3]", s)
+	}
+}
+
+const sampleDualtestTCPOutput = `------------------------------------------------------------
+Client connecting to 192.168.1.1, TCP port 5201
+TCP window size: 0.12 MByte (default)
+------------------------------------------------------------
+[  1] local 192.168.1.2 port 55442 connected with 192.168.1.1 port 5201
+------------------------------------------------------------
+Server listening on TCP port 5201
+------------------------------------------------------------
+[  2] local 192.168.1.2 port 5201 connected with 192.168.1.1 port 55443
+[  1]  0.00-1.00 sec  11.2 MBytes  94.37 Mbits/sec
+[  2]  0.00-1.00 sec  10.5 MBytes  88.08 Mbits/sec
+[  1]  1.00-2.00 sec  11.5 MBytes  96.47 Mbits/sec
+[  2]  1.00-2.00 sec  10.8 MBytes  90.58 Mbits/sec
+[  1]  0.00-2.00 sec  22.7 MBytes  95.23 Mbits/sec
+[  2]  0.00-2.00 sec  21.3 MBytes  89.33 Mbits/sec`
+
+func TestParseDualtestOutput_TCP(t *testing.T) {
+	result, err := ParseDualtestOutput(sampleDualtestTCPOutput)
+	if err != nil {
+		t.Fatalf("ParseDualtestOutput() error: %v", err)
+	}
+
+	if result.Direction != "Bidirectional" {
+		t.Errorf("Direction = %q, want Bidirectional", result.Direction)
+	}
+
+	// Stream 1 is forward (client), should produce 2 per-second intervals
+	if len(result.Intervals) != 2 {
+		t.Errorf("expected 2 forward intervals, got %d", len(result.Intervals))
+	}
+
+	// Stream 2 is reverse (server), should produce 2 per-second intervals
+	if len(result.ReverseIntervals) != 2 {
+		t.Errorf("expected 2 reverse intervals, got %d", len(result.ReverseIntervals))
+	}
+
+	// Forward summary should reflect stream 1 summary line (95.23 Mbits/sec)
+	if result.SentBps == 0 {
+		t.Error("SentBps should be > 0 from forward stream")
+	}
+
+	// Reverse summary should reflect stream 2 (89.33 Mbits/sec)
+	if result.ReverseReceivedBps == 0 {
+		t.Error("ReverseReceivedBps should be > 0 from reverse stream")
+	}
+}
+
+func TestParseDualtestOutput_EmptyInput(t *testing.T) {
+	_, err := ParseDualtestOutput("")
+	if err == nil {
+		t.Error("expected error for empty dualtest output")
+	}
+}
+
+func TestParseDualtestOutput_ForwardReverseInterleaved(t *testing.T) {
+	// Verify that interleaved stream IDs are correctly separated
+	result, err := ParseDualtestOutput(sampleDualtestTCPOutput)
+	if err != nil {
+		t.Fatalf("ParseDualtestOutput() error: %v", err)
+	}
+
+	// Forward intervals from stream 1: 0.00-1.00 and 1.00-2.00
+	if len(result.Intervals) >= 1 {
+		if result.Intervals[0].TimeStart != 0.0 {
+			t.Errorf("first forward interval TimeStart = %f, want 0.0", result.Intervals[0].TimeStart)
+		}
+	}
+	if len(result.Intervals) >= 2 {
+		if result.Intervals[1].TimeStart != 1.0 {
+			t.Errorf("second forward interval TimeStart = %f, want 1.0", result.Intervals[1].TimeStart)
+		}
+	}
+
+	// Reverse intervals from stream 2: 0.00-1.00 and 1.00-2.00
+	if len(result.ReverseIntervals) >= 1 {
+		if result.ReverseIntervals[0].TimeStart != 0.0 {
+			t.Errorf("first reverse interval TimeStart = %f, want 0.0", result.ReverseIntervals[0].TimeStart)
+		}
+	}
+	if len(result.ReverseIntervals) >= 2 {
+		if result.ReverseIntervals[1].TimeStart != 1.0 {
+			t.Errorf("second reverse interval TimeStart = %f, want 1.0", result.ReverseIntervals[1].TimeStart)
+		}
 	}
 }
 

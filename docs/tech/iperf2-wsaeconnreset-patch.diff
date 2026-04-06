@@ -1,0 +1,75 @@
+--- a/include/headers.h
++++ b/include/headers.h
+@@ -176,7 +176,15 @@
+     #include <windows.h>
+     #include <winsock2.h>
+     #include <ws2tcpip.h>
++    #include <mstcpip.h>
+     #include <process.h>
++
++/* SIO_UDP_CONNRESET disables ICMP "Port Unreachable" injection on UDP
++ * sockets (Microsoft KB 263823). Define it here for toolchains that do
++ * not expose it via mstcpip.h or ws2tcpip.h (available since WinXP). */
++#ifndef SIO_UDP_CONNRESET
++#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
++#endif
+ 
+ /* define EINTR, just to help compile; it isn't useful */
+     #ifndef EINTR
+--- a/include/util.h
++++ b/include/util.h
+@@ -283,7 +283,7 @@
+ // Define fatal and nonfatal write errors
+ #ifdef WIN32
+ #define FATALTCPREADERR(errno) (WSAGetLastError() != WSAEWOULDBLOCK)
+-#define FATALUDPREADERR(errno)  (((errno = WSAGetLastError()) != WSAEWOULDBLOCK))
++#define FATALUDPREADERR(errno)  (((errno = WSAGetLastError()) != WSAEWOULDBLOCK) && (errno != WSAECONNRESET))
+ #define FATALTCPWRITERR(errno)  ((errno = WSAGetLastError()) != WSAETIMEDOUT)
+ #define NONFATALTCPWRITERR(errno) ((errno = WSAGetLastError()) == WSAETIMEDOUT)
+ #define FATALUDPWRITERR(errno)  (((errno = WSAGetLastError()) != WSAETIMEDOUT) \
+--- a/src/Listener.cpp
++++ b/src/Listener.cpp
+@@ -431,6 +431,21 @@
+                     WARN_errno(ListenSocket == INVALID_SOCKET, "socket");
+                 }
+             mSettings->mSock = ListenSocket;
++#ifdef WIN32
++            if (isUDP(mSettings)) {
++                /* Disable Windows WSAECONNRESET on UDP sockets (KB 263823).
++                 * Without this fix, an ICMP "Port Unreachable" reply from a
++                 * disconnected client is delivered as WSAECONNRESET (error 10054)
++                 * on the next recvfrom() call. iperf2's FATALUDPREADERR treats
++                 * this as fatal, causing the server thread to exit and the socket
++                 * to be permanently poisoned for all subsequent clients.
++                 * Linux and macOS silently discard these ICMP errors on UDP. */
++                BOOL bNewBehavior = FALSE;
++                DWORD dwBytesReturned = 0;
++                WSAIoctl(ListenSocket, SIO_UDP_CONNRESET, &bNewBehavior,
++                         sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
++            }
++#endif
+             SetSocketOptions(mSettings);
+             SetSocketBindToDeviceIfNeeded(mSettings);
+             rc = SOCKET_ERROR;
+--- a/src/Client.cpp
++++ b/src/Client.cpp
+@@ -143,6 +143,19 @@
+     WARN_errno(mySocket == INVALID_SOCKET, "socket");
+     // Socket is carried both by the object and the thread
+     mSettings->mSock=mySocket;
++#ifdef WIN32
++    if (isUDP(mSettings)) {
++        /* Disable Windows WSAECONNRESET on UDP sockets (KB 263823).
++         * Without this fix, an ICMP "Port Unreachable" reply from a
++         * disconnected peer is delivered as WSAECONNRESET (error 10054)
++         * on the next recvfrom() call, poisoning the socket.
++         * Linux and macOS silently discard these ICMP errors on UDP. */
++        BOOL bNewBehavior = FALSE;
++        DWORD dwBytesReturned = 0;
++        WSAIoctl(mySocket, SIO_UDP_CONNRESET, &bNewBehavior,
++                 sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
++    }
++#endif
+     SetSocketOptions(mSettings);
+     SockAddr_localAddr(mSettings);
+     SockAddr_remoteAddr(mSettings);

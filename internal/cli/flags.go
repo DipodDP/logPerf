@@ -4,9 +4,31 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/user"
+	"runtime"
 
 	"iperf-tool/internal/iperf"
 )
+
+func defaultUsername() string {
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	if u := os.Getenv("USERNAME"); u != "" {
+		return u
+	}
+	if cu, err := user.Current(); err == nil {
+		return cu.Username
+	}
+	return ""
+}
+
+func defaultBinaryPath() string {
+	if runtime.GOOS == "windows" {
+		return "iperf.exe"
+	}
+	return "iperf"
+}
 
 // ParseFlags parses command-line arguments and returns a RunnerConfig.
 // Returns nil config and prints help if no arguments or --help is provided.
@@ -26,7 +48,7 @@ func ParseFlags() (*RunnerConfig, error) {
 		Duration:   10,
 		Interval:   1,
 		Protocol:   "tcp",
-		BinaryPath: "iperf",
+		BinaryPath: defaultBinaryPath(),
 		SSHPort:    22,
 	}
 
@@ -55,10 +77,12 @@ func ParseFlags() (*RunnerConfig, error) {
 	fs.StringVar(&cfg.Bandwidth, "b", "", "Target bandwidth (e.g. 100M, 1G)")
 	fs.StringVar(&cfg.Bandwidth, "bandwidth", "", "Target bandwidth (e.g. 100M, 1G)")
 	fs.StringVar(&cfg.BinaryPath, "binary", cfg.BinaryPath, "Path to iperf2 binary")
+	fs.BoolVar(&cfg.IPv6, "V", false, "Use IPv6 (iperf2 -V flag)")
+	fs.BoolVar(&cfg.IPv6, "ipv6", false, "Use IPv6 (iperf2 -V flag)")
 
 	// Remote server flags
 	fs.StringVar(&cfg.SSHHost, "ssh", "", "SSH host for remote server")
-	fs.StringVar(&cfg.SSHUser, "user", os.Getenv("USER"), "SSH username")
+	fs.StringVar(&cfg.SSHUser, "user", defaultUsername(), "SSH username")
 	fs.StringVar(&cfg.SSHKeyPath, "key", "", "SSH private key path")
 	fs.StringVar(&cfg.SSHPassword, "password", "", "SSH password (insecure, use key instead)")
 	fs.IntVar(&cfg.SSHPort, "ssh-port", 22, "SSH port")
@@ -75,7 +99,7 @@ func ParseFlags() (*RunnerConfig, error) {
 	fs.StringVar(&cfg.OutputCSV, "output", "", "Output base path (default: results/results); date suffix added automatically")
 	fs.BoolVar(&cfg.Verbose, "v", false, "Verbose output")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "Verbose output")
-	fs.BoolVar(&cfg.Debug, "debug", false, fmt.Sprintf("Log raw iperf2 output to %s", iperf.DebugLogPath))
+	fs.BoolVar(&cfg.Debug, "debug", false, "Log raw iperf2 output to "+iperf.DebugLogPath)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return nil, err
@@ -117,6 +141,7 @@ LOCAL TEST MODE:
   -R, --reverse            Reverse mode (server sends, client receives)
   --bidir                  Bidirectional mode (simultaneous both directions)
   -b, --bandwidth <rate>   Target bandwidth (e.g. 100M, 1G; empty = unlimited)
+  -V, --ipv6               Use IPv6
   --ping                   Measure latency before and during test
   --binary <path>          Path to iperf2 binary (default: iperf)
 
@@ -137,7 +162,7 @@ REPEAT:
 OUTPUT:
   -o, --output <path>      Output base path (default: results/results); date appended automatically
   -v, --verbose            Verbose output
-  --debug                  Log raw iperf2 output to /tmp/iperf-debug.log (GUI: set IPERF_DEBUG=1)
+  --debug                  Log raw iperf2 output to temp dir (GUI: set IPERF_DEBUG=1)
 
 EXAMPLES:
   # Run local test to server
@@ -148,6 +173,9 @@ EXAMPLES:
 
   # Test via UDP
   iperf-tool -s 10.0.0.1 -u -t 20
+
+  # Run test using IPv6
+  iperf-tool -s 2001:db8::1 -V -t 20
 
   # Repeat continuously until Ctrl-C
   iperf-tool -s 192.168.1.1 -t 10 --repeat

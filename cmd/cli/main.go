@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/signal"
 	"sync/atomic"
-	"syscall"
 
 	"iperf-tool/internal/cli"
 	"iperf-tool/internal/iperf"
@@ -92,7 +91,7 @@ func runRemoteServer(cfg *cli.RunnerConfig) error {
 
 func runCLIRepeat(cfg *cli.RunnerConfig) error {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, os.Interrupt)
 
 	var stopped int32
 

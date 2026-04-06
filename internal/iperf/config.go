@@ -33,6 +33,7 @@ type Config struct {
 	ProbeTimeout     time.Duration // UDP probe timeout, default 2s
 	SkipProbe        bool          // skip pre-flight UDP reachability probe
 	KillWaitMs       int           // post-kill wait before reading file, default 500
+	IPv6             bool          // Use IPv6 (-V flag)
 }
 
 // IperfConfig is an alias for Config to ease the migration.
@@ -133,19 +134,15 @@ func parseBandwidthBits(bw string) float64 {
 	return v * mult
 }
 
-// BandwidthPerStreamMbps returns the per-stream target in Mbps
-// (total Bandwidth / number of parallel streams).
+// BandwidthPerStreamMbps returns the per-stream target in Mbps.
+// iperf2 applies the -b value per stream, so this returns the -b value directly.
 // Returns 0 if Bandwidth is empty (unlimited).
 func (c *Config) BandwidthPerStreamMbps() float64 {
 	bits := parseBandwidthBits(c.Bandwidth)
 	if bits == 0 {
 		return 0
 	}
-	streams := float64(c.Parallel)
-	if streams < 1 {
-		streams = 1
-	}
-	return bits / streams / 1_000_000
+	return bits / 1_000_000
 }
 
 const (
@@ -187,6 +184,8 @@ func (c *Config) ApplyToResult(result *model.TestResult, mode string) {
 		result.Direction = "Reverse"
 	} else if c.Bidir {
 		result.Direction = "Bidirectional"
+	} else {
+		result.Direction = "Forward"
 	}
 	if bw := c.BandwidthPerStreamMbps(); bw > 0 {
 		result.Bandwidth = fmt.Sprintf("%.2f", bw)
@@ -219,8 +218,11 @@ func (c *Config) fwdServerArgs() []string {
 	if c.Enhanced {
 		args = append(args, "-e")
 	}
-	if c.SSHFallback && c.RemoteOutputFile != "" {
+	if c.RemoteOutputFile != "" {
 		args = append(args, "-o", c.RemoteOutputFile)
+	}
+	if c.IPv6 {
+		args = append(args, "-V")
 	}
 	return args
 }
@@ -244,6 +246,9 @@ func (c *Config) fwdClientArgs() []string {
 	if c.Enhanced {
 		args = append(args, "-e")
 	}
+	if c.IPv6 {
+		args = append(args, "-V")
+	}
 	return args
 }
 
@@ -258,6 +263,9 @@ func (c *Config) revServerArgs() []string {
 		"-i", strconv.Itoa(c.Interval))
 	if c.Enhanced {
 		args = append(args, "-e")
+	}
+	if c.IPv6 {
+		args = append(args, "-V")
 	}
 	return args
 }
@@ -286,22 +294,59 @@ func (c *Config) revClientCmd() string {
 	if c.Enhanced {
 		parts = append(parts, "-e")
 	}
+	if c.IPv6 {
+		parts = append(parts, "-V")
+	}
 	return strings.Join(parts, " ")
 }
 
+// dualtestClientArgs returns client args for iperf2's native bidirectional
+// dualtest mode (-d flag). This runs both directions in a single process.
+func (c *Config) dualtestClientArgs() []string {
+	args := []string{"-c", c.ServerAddr}
+	if c.Protocol == "udp" {
+		args = append(args, "-u")
+	}
+	args = append(args, "-d") // dualtest flag
+	args = append(args, "-p", c.PortRangeStr(0),
+		"-t", strconv.Itoa(c.Duration),
+		"-f", "m",
+		"-i", strconv.Itoa(c.Interval))
+	if c.BlockSize > 0 {
+		args = append(args, "-l", strconv.Itoa(c.BlockSize))
+	}
+	if c.Bandwidth != "" && c.Protocol == "udp" {
+		args = append(args, "-b", c.Bandwidth)
+	}
+	if c.Enhanced {
+		args = append(args, "-e")
+	}
+	if c.IPv6 {
+		args = append(args, "-V")
+	}
+	return args
+}
+
 // remoteServerStartCmd returns the SSH command to start the remote iperf server.
+// On Unix, nohup backgrounds the process so it survives SSH session close.
+// On Windows, schtasks detaches the process from the SSH session.
 func (c *Config) remoteServerStartCmd() string {
 	args := c.fwdServerArgs()
 	if c.IsWindows {
-		return fmt.Sprintf("start /B iperf.exe %s", strings.Join(args, " "))
+		argStr := strings.Join(args, " ")
+		// Use WMI to start a detached process — schtasks fails in non-interactive
+		// SSH sessions (Interactive only logon mode).
+		return fmt.Sprintf(
+			`powershell -Command "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList 'iperf.exe %s'"`,
+			argStr)
 	}
-	return fmt.Sprintf("iperf %s &", strings.Join(args, " "))
+	return fmt.Sprintf("nohup iperf %s > /dev/null 2>&1 &", strings.Join(args, " "))
 }
 
-// remoteServerKillCmd returns the SSH command to gracefully kill the remote iperf server.
+// remoteServerKillCmd returns the SSH command to kill the remote iperf server.
 func (c *Config) remoteServerKillCmd() string {
 	if c.IsWindows {
-		return "taskkill /IM iperf.exe"
+		return `taskkill /IM iperf.exe /F`
 	}
 	return "pkill -f 'iperf -s'"
 }

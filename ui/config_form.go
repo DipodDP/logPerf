@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"runtime"
 	"strconv"
 
 	"fyne.io/fyne/v2"
@@ -22,6 +23,7 @@ type ConfigForm struct {
 	blockSizeEntry   *widget.Entry
 	bandwidthEntry   *widget.Entry
 	measurePingCheck *widget.Check
+	ipv6Check        *widget.Check
 	binaryEntry      *widget.Entry
 	form             *fyne.Container
 }
@@ -64,10 +66,16 @@ func NewConfigForm() *ConfigForm {
 	cf.bandwidthEntry.SetPlaceHolder("100M, 1G")
 
 	cf.measurePingCheck = widget.NewCheck("Measure Ping", nil)
+	cf.ipv6Check = widget.NewCheck("IPv6", nil)
 
 	cf.binaryEntry = widget.NewEntry()
-	cf.binaryEntry.SetText("iperf")
-	cf.binaryEntry.SetPlaceHolder("/usr/local/bin/iperf")
+	if runtime.GOOS == "windows" {
+		cf.binaryEntry.SetText("iperf.exe")
+		cf.binaryEntry.SetPlaceHolder(`C:\iperf2\iperf.exe`)
+	} else {
+		cf.binaryEntry.SetText("iperf")
+		cf.binaryEntry.SetPlaceHolder("/usr/local/bin/iperf")
+	}
 
 	connection := container.NewVBox(
 		widget.NewForm(
@@ -75,6 +83,7 @@ func NewConfigForm() *ConfigForm {
 			widget.NewFormItem("Port", cf.portEntry),
 			widget.NewFormItem("Protocol", cf.protocolRadio),
 		),
+		cf.ipv6Check,
 	)
 
 	testParams := container.NewVBox(
@@ -151,6 +160,7 @@ func (cf *ConfigForm) LoadPreferences(prefs fyne.Preferences) {
 		cf.bandwidthEntry.SetText(v)
 	}
 	cf.measurePingCheck.SetChecked(prefs.Bool("config.measure_ping"))
+	cf.ipv6Check.SetChecked(prefs.Bool("config.ipv6"))
 	if v := prefs.String("config.binary"); v != "" {
 		cf.binaryEntry.SetText(v)
 	}
@@ -168,6 +178,7 @@ func (cf *ConfigForm) SavePreferences(prefs fyne.Preferences) {
 	prefs.SetString("config.block_size", cf.blockSizeEntry.Text)
 	prefs.SetString("config.bandwidth", cf.bandwidthEntry.Text)
 	prefs.SetBool("config.measure_ping", cf.measurePingCheck.Checked)
+	prefs.SetBool("config.ipv6", cf.ipv6Check.Checked)
 	prefs.SetString("config.binary", cf.binaryEntry.Text)
 }
 
@@ -201,6 +212,7 @@ func (cf *ConfigForm) Config() iperf.IperfConfig {
 		Bidir:       bidir,
 		Bandwidth:   cf.bandwidthEntry.Text,
 		MeasurePing: cf.measurePingCheck.Checked,
+		IPv6:        cf.ipv6Check.Checked,
 		Enhanced:    true,
 	}
 }

@@ -15,7 +15,7 @@ import (
 //   - true, nil: inbound UDP is open (direct mode safe)
 //   - false, nil: timeout — NAT likely blocking inbound UDP (use SSH fallback)
 //   - false, err: probe failed (SSH error, etc.)
-func ProbeUDPReachability(ctx context.Context, sshCli SSHClient, localAddr string, probeTimeout time.Duration, isWindows bool) (bool, error) {
+func ProbeUDPReachability(ctx context.Context, sshCli SSHClient, localAddr string, probeTimeout time.Duration, isWindows bool, ipv6 bool) (bool, error) {
 	if sshCli == nil {
 		return false, fmt.Errorf("SSH client required for UDP probe")
 	}
@@ -26,8 +26,12 @@ func ProbeUDPReachability(ctx context.Context, sshCli SSHClient, localAddr strin
 		probeTimeout = 2 * time.Second
 	}
 
+	network := "udp4"
+	if ipv6 {
+		network = "udp6"
+	}
 	// Bind a local UDP socket on an ephemeral port
-	conn, err := net.ListenPacket("udp4", localAddr+":0")
+	conn, err := net.ListenPacket(network, localAddr+":0")
 	if err != nil {
 		return false, fmt.Errorf("bind local UDP socket: %w", err)
 	}
@@ -42,7 +46,13 @@ func ProbeUDPReachability(ctx context.Context, sshCli SSHClient, localAddr strin
 			`PowerShell -Command "$u=New-Object System.Net.Sockets.UdpClient; $b=[Text.Encoding]::ASCII.GetBytes('PROBE'); $u.Send($b,$b.Length,'%s',%d); $u.Close()"`,
 			localAddr, port)
 	} else {
-		remoteCmd = fmt.Sprintf("echo -n PROBE | nc -u -w1 %s %d", localAddr, port)
+		ncCmd := "nc -u -w1"
+		if ipv6 {
+			// Some nc versions use -6 for IPv6, but generally nc resolves
+			// the address family if we pass an IPv6 address.
+			ncCmd = "nc -6 -u -w1"
+		}
+		remoteCmd = fmt.Sprintf("echo -n PROBE | %s %s %d", ncCmd, localAddr, port)
 	}
 
 	// Set read deadline before sending the remote command

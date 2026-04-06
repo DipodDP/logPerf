@@ -41,8 +41,15 @@ func FormatBidirIntervalHeader(isUDP bool) string {
 }
 
 // FormatBidirInterval produces a single formatted line for a bidirectional interval.
-// rev may be nil if the reverse interval is not yet available.
+// Either fwd or rev may be nil if that direction's interval is not yet available.
 func FormatBidirInterval(fwd, rev *model.IntervalResult, isUDP bool) string {
+	var fwdMbps, fwdMB float64
+	fwdRetr := 0
+	if fwd != nil {
+		fwdMbps = fwd.BandwidthMbps()
+		fwdMB = fwd.TransferMB()
+		fwdRetr = fwd.Retransmits
+	}
 	var revMbps, revMB float64
 	revRetr := 0
 	if rev != nil {
@@ -62,13 +69,13 @@ func FormatBidirInterval(fwd, rev *model.IntervalResult, isUDP bool) string {
 		}
 		revLostStr := fmt.Sprintf("%d/%d (%.1f%%)", revLost, revPkts, revLostPct)
 		return fmt.Sprintf("%-12.2f %-12.2f %-10.2f %-10.2f %-12.3f %-21s",
-			fwd.BandwidthMbps(), revMbps, fwd.TransferMB(), revMB,
+			fwdMbps, revMbps, fwdMB, revMB,
 			revJitter, revLostStr)
 	}
 	return fmt.Sprintf("%-12.2f %-12.2f %-10.2f %-10.2f %-10d %d",
-		fwd.BandwidthMbps(), revMbps,
-		fwd.TransferMB(), revMB,
-		fwd.Retransmits, revRetr)
+		fwdMbps, revMbps,
+		fwdMB, revMB,
+		fwdRetr, revRetr)
 }
 
 // FormatResult produces a human-readable formatted output of a test result.
@@ -197,11 +204,19 @@ func FormatResult(r *model.TestResult) string {
 		if hasReceiver {
 			b.WriteString(fmt.Sprintf("Received:        %.2f Mbps\n", r.ReceivedMbps()))
 		}
-		b.WriteString(fmt.Sprintf("Jitter:          %.3f ms\n", r.JitterMs))
-		if r.FwdPackets > 0 {
-			b.WriteString(fmt.Sprintf("Packet Loss:     %d/%d (%.2f%%)\n", r.FwdLostPackets, r.FwdPackets, r.FwdLostPercent))
+		// Detect fabricated Server Report: 0.000 ms jitter with 0% loss is likely
+		// fabricated by the client when the server ACK was not received (NAT).
+		fabricated := r.FabricatedServerReport
+		if fabricated {
+			b.WriteString("Jitter:          N/A (Server Report unavailable — likely NAT)\n")
+			b.WriteString("Packet Loss:     N/A (Server Report unavailable — likely NAT)\n")
 		} else {
-			b.WriteString(fmt.Sprintf("Packet Loss:     %d/%d (%.2f%%)\n", r.LostPackets, r.Packets, r.LostPercent))
+			b.WriteString(fmt.Sprintf("Jitter:          %.3f ms\n", r.JitterMs))
+			if r.FwdPackets > 0 {
+				b.WriteString(fmt.Sprintf("Packet Loss:     %d/%d (%.2f%%)\n", r.FwdLostPackets, r.FwdPackets, r.FwdLostPercent))
+			} else {
+				b.WriteString(fmt.Sprintf("Packet Loss:     %d/%d (%.2f%%)\n", r.LostPackets, r.Packets, r.LostPercent))
+			}
 		}
 	} else if hasReceiver {
 		b.WriteString(fmt.Sprintf("Sent:            %.2f Mbps\n", r.SentMbps()))

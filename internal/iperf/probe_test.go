@@ -35,7 +35,7 @@ func (m *mockSSHClient) RunCommand(cmd string) (string, error) {
 }
 
 func TestProbeUDPReachability_NilSSH(t *testing.T) {
-	_, err := ProbeUDPReachability(context.Background(), nil, "127.0.0.1", 2*time.Second, false)
+	_, err := ProbeUDPReachability(context.Background(), nil, "127.0.0.1", 2*time.Second, false, false)
 	if err == nil {
 		t.Error("expected error for nil SSH client")
 	}
@@ -43,7 +43,7 @@ func TestProbeUDPReachability_NilSSH(t *testing.T) {
 
 func TestProbeUDPReachability_EmptyAddr(t *testing.T) {
 	mock := newMockSSH()
-	_, err := ProbeUDPReachability(context.Background(), mock, "", 2*time.Second, false)
+	_, err := ProbeUDPReachability(context.Background(), mock, "", 2*time.Second, false, false)
 	if err == nil {
 		t.Error("expected error for empty local address")
 	}

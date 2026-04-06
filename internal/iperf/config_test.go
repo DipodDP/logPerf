@@ -239,8 +239,8 @@ func TestRemoteServerStartCmd_Windows(t *testing.T) {
 	cfg.IsWindows = true
 	cfg.Interval = 1
 	cmd := cfg.remoteServerStartCmd()
-	if !strings.Contains(cmd, "start /B") {
-		t.Error("expected 'start /B' for Windows")
+	if !strings.Contains(cmd, "Invoke-WmiMethod") {
+		t.Error("expected 'Invoke-WmiMethod' for Windows")
 	}
 	if !strings.Contains(cmd, "iperf.exe") {
 		t.Error("expected 'iperf.exe' for Windows")
@@ -266,8 +266,8 @@ func TestBandwidthPerStreamMbps(t *testing.T) {
 	}{
 		{"", 1, 0},
 		{"100M", 1, 100},
-		{"100M", 4, 25},
-		{"1G", 2, 500},
+		{"100M", 4, 100},
+		{"1G", 2, 1000},
 		{"500K", 1, 0.5},
 	}
 	for _, tt := range tests {
@@ -304,6 +304,115 @@ func TestConfigValidation(t *testing.T) {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestFwdClientArgs_IPv6(t *testing.T) {
+	cfg := validConfig()
+	cfg.IPv6 = true
+	args := cfg.fwdClientArgs()
+	if !containsArg(args, "-V") {
+		t.Error("expected -V flag in fwdClientArgs when IPv6 is true")
+	}
+}
+
+func TestRevClientCmd_IPv6(t *testing.T) {
+	cfg := validConfig()
+	cfg.IPv6 = true
+	cfg.LocalAddr = "192.168.1.2"
+	cmd := cfg.revClientCmd()
+	if !strings.Contains(cmd, "-V") {
+		t.Errorf("expected -V flag in revClientCmd when IPv6 is true, got: %s", cmd)
+	}
+}
+
+func TestDualtestClientArgs_TCP(t *testing.T) {
+	cfg := validConfig()
+	cfg.Protocol = "tcp"
+	cfg.Duration = 10
+	cfg.Interval = 1
+	args := cfg.dualtestClientArgs()
+
+	if !containsArg(args, "-d") {
+		t.Error("expected -d flag for dualtest")
+	}
+	if !containsArg(args, "-c") {
+		t.Error("expected -c flag")
+	}
+	if containsArg(args, "-u") {
+		t.Error("unexpected -u flag for TCP dualtest")
+	}
+	if containsArg(args, "-b") {
+		t.Error("unexpected -b flag for TCP dualtest without bandwidth")
+	}
+	if !containsArg(args, "-p") {
+		t.Error("expected -p flag")
+	}
+	if !containsArg(args, "-t") {
+		t.Error("expected -t flag")
+	}
+	if !containsArg(args, "-f") {
+		t.Error("expected -f flag")
+	}
+	if !containsArg(args, "-i") {
+		t.Error("expected -i flag")
+	}
+	// Verify format is 'm' (Mbits)
+	for i, a := range args {
+		if a == "-f" && i+1 < len(args) {
+			if args[i+1] != "m" {
+				t.Errorf("expected -f m, got -f %s", args[i+1])
+			}
+		}
+	}
+	// Verify server addr follows -c
+	for i, a := range args {
+		if a == "-c" && i+1 < len(args) {
+			if args[i+1] != cfg.ServerAddr {
+				t.Errorf("expected -c %s, got -c %s", cfg.ServerAddr, args[i+1])
+			}
+		}
+	}
+}
+
+func TestDualtestClientArgs_UDP(t *testing.T) {
+	cfg := validConfig()
+	cfg.Protocol = "udp"
+	cfg.Bandwidth = "10M"
+	cfg.Duration = 5
+	cfg.Interval = 1
+	args := cfg.dualtestClientArgs()
+
+	if !containsArg(args, "-d") {
+		t.Error("expected -d flag for dualtest")
+	}
+	if !containsArg(args, "-u") {
+		t.Error("expected -u flag for UDP dualtest")
+	}
+	if !containsArg(args, "-b") {
+		t.Error("expected -b flag for UDP dualtest with bandwidth set")
+	}
+	// Verify bandwidth value follows -b
+	for i, a := range args {
+		if a == "-b" && i+1 < len(args) {
+			if args[i+1] != cfg.Bandwidth {
+				t.Errorf("expected -b %s, got -b %s", cfg.Bandwidth, args[i+1])
+			}
+		}
+	}
+}
+
+func TestDualtestClientArgs_TCP_NoBandwidth(t *testing.T) {
+	// TCP dualtest should never include -b even if Bandwidth is set
+	cfg := validConfig()
+	cfg.Protocol = "tcp"
+	cfg.Bandwidth = "100M"
+	cfg.Duration = 10
+	cfg.Interval = 1
+	args := cfg.dualtestClientArgs()
+
+	if containsArg(args, "-b") {
+		t.Error("unexpected -b flag for TCP dualtest (bandwidth only applies to UDP)")
 	}
 }
 

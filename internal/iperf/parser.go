@@ -41,10 +41,20 @@ var (
 	reClientInterval = regexp.MustCompile(
 		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s*$`)
 
+	// Enhanced TCP server-side interval (-e mode): Reads=Dist histogram
+	// [  1]  0.00-1.00 sec  2.51 MBytes  21.0 Mbits/sec  585=576:3:0:0:0:0:1:5
+	reServerEnhancedTCP = regexp.MustCompile(
+		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+\d+=`)
+
 	// Enhanced client-side interval (-e mode): adds Write/Err/Timeo
 	// [  1]  0.00-1.00 sec  0.875 MBytes  7.34 Mbits/sec  625/0/0
 	reClientEnhanced = regexp.MustCompile(
 		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+(\d+)/(\d+)/(\d+)`)
+
+	// Enhanced TCP client with -V flag: Write/Err  Rtry  Cwnd/RTT  NetPwr
+	// [  1] 0.00-3.35 sec  28.5 MBytes  71.4 Mbits/sec  229/0          0       NA/98000(49)us    91.10
+	reClientTCPVerbose = regexp.MustCompile(
+		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+(\d+)/(\d+)\s+(\d+)`)
 
 	// SUM line (server-side, with loss):
 	// [SUM-2]  0.00-10.00 sec  9.77 MBytes  5.59 Mbits/sec  4942/11909 (41%)
@@ -110,9 +120,19 @@ func parseSingleLine(line string) (*parsedLine, bool) {
 		return parseServerIntervalMatch(m), true
 	}
 
+	// 2b. Try enhanced TCP server-side (Reads=Dist histogram, no jitter)
+	if m := reServerEnhancedTCP.FindStringSubmatch(line); m != nil {
+		return parseServerEnhancedTCPMatch(m), true
+	}
+
 	// 3. Try enhanced client-side (Write/Err/Timeo)
 	if m := reClientEnhanced.FindStringSubmatch(line); m != nil {
 		return parseClientEnhancedMatch(m), true
+	}
+
+	// 3b. Try TCP verbose (-V) client-side (Write/Err  Rtry)
+	if m := reClientTCPVerbose.FindStringSubmatch(line); m != nil {
+		return parseClientTCPVerboseMatch(m), true
 	}
 
 	// 4. Try standard client-side (bandwidth only)
@@ -160,6 +180,18 @@ func parseServerIntervalMatch(m []string) *parsedLine {
 	return p
 }
 
+func parseServerEnhancedTCPMatch(m []string) *parsedLine {
+	p := &parsedLine{}
+	p.streamID, _ = strconv.Atoi(m[1])
+	p.timeStart, _ = strconv.ParseFloat(m[2], 64)
+	p.timeEnd, _ = strconv.ParseFloat(m[3], 64)
+	mb, _ := strconv.ParseFloat(m[4], 64)
+	p.bytes = int64(mb * 1_000_000)
+	bw, _ := strconv.ParseFloat(m[5], 64)
+	p.bandwidthBps = bw * 1_000_000
+	return p
+}
+
 func parseClientEnhancedMatch(m []string) *parsedLine {
 	p := &parsedLine{}
 	p.streamID, _ = strconv.Atoi(m[1])
@@ -184,6 +216,20 @@ func parseClientIntervalMatch(m []string) *parsedLine {
 	p.bytes = int64(mb * 1_000_000)
 	bw, _ := strconv.ParseFloat(m[5], 64)
 	p.bandwidthBps = bw * 1_000_000
+	return p
+}
+
+func parseClientTCPVerboseMatch(m []string) *parsedLine {
+	p := &parsedLine{}
+	p.streamID, _ = strconv.Atoi(m[1])
+	p.timeStart, _ = strconv.ParseFloat(m[2], 64)
+	p.timeEnd, _ = strconv.ParseFloat(m[3], 64)
+	mb, _ := strconv.ParseFloat(m[4], 64)
+	p.bytes = int64(mb * 1_000_000)
+	bw, _ := strconv.ParseFloat(m[5], 64)
+	p.bandwidthBps = bw * 1_000_000
+	p.writeCount, _ = strconv.Atoi(m[6])
+	p.errCount, _ = strconv.Atoi(m[7])
 	return p
 }
 
@@ -537,14 +583,34 @@ func ValidateServerReport(text string) ServerReportStatus {
 	if hasWarning {
 		return ServerReportFabricated
 	}
-	// Check for fabricated data: 0.000 ms jitter is a strong indicator
-	// even without explicit WARNING (e.g. SIGTERM killed before WARNING printed)
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !reServerReport.MatchString(trimmed) {
+	// Check for fabricated data: 0.000 ms jitter in a Server Report data line is
+	// a strong indicator even without an explicit WARNING (e.g. Tailscale, SIGTERM).
+	// After a "Server Report:" header, check data lines for jitter == 0.000 ms.
+	lines := strings.Split(text, "\n")
+	inReport := false
+	allZeroJitter := true
+	reportDataLines := 0
+	for _, line := range lines {
+		if reServerReport.MatchString(line) {
+			inReport = true
 			continue
 		}
-		// Check next line for 0.000 ms jitter pattern
+		if inReport {
+			m := reServerInterval.FindStringSubmatch(line)
+			if m == nil {
+				m = reServerEnhanced.FindStringSubmatch(line)
+			}
+			if m != nil {
+				reportDataLines++
+				jitter, _ := strconv.ParseFloat(m[6], 64)
+				if jitter != 0.0 {
+					allZeroJitter = false
+				}
+			}
+		}
+	}
+	if reportDataLines > 0 && allZeroJitter {
+		return ServerReportFabricated
 	}
 	return ServerReportValid
 }
@@ -565,6 +631,7 @@ func MergeBidirResults(fwdClient, fwdServer, revClient, revServer *model.TestRes
 		if result.FwdReceivedBps == 0 {
 			result.FwdReceivedBps = fwdServer.ReceivedBps
 		}
+		result.BytesReceived = fwdServer.BytesReceived
 		result.FwdLostPackets = fwdServer.FwdLostPackets
 		if result.FwdLostPackets == 0 {
 			result.FwdLostPackets = fwdServer.LostPackets
@@ -595,6 +662,7 @@ func MergeBidirResults(fwdClient, fwdServer, revClient, revServer *model.TestRes
 		if result.ReverseReceivedBps == 0 {
 			result.ReverseReceivedBps = revServer.ReceivedBps
 		}
+		result.ReverseBytesReceived = revServer.BytesReceived
 		result.ReverseJitterMs = revServer.FwdJitterMs
 		if result.ReverseJitterMs == 0 {
 			result.ReverseJitterMs = revServer.JitterMs
@@ -627,6 +695,10 @@ func MergeUnidirResults(client, server *model.TestResult) *model.TestResult {
 		if result.FwdReceivedBps == 0 {
 			result.FwdReceivedBps = server.ReceivedBps
 		}
+		if result.FwdReceivedBps == 0 {
+			result.FwdReceivedBps = server.SentBps // server-side "sent" = received data
+		}
+		result.ReceivedBps = result.FwdReceivedBps
 		result.FwdLostPackets = server.FwdLostPackets
 		if result.FwdLostPackets == 0 {
 			result.FwdLostPackets = server.LostPackets
@@ -643,9 +715,184 @@ func MergeUnidirResults(client, server *model.TestResult) *model.TestResult {
 		if result.FwdLostPercent == 0 {
 			result.FwdLostPercent = server.LostPercent
 		}
+		// Set BytesReceived from server-side data for CSV/display
+		if result.BytesReceived == 0 {
+			result.BytesReceived = server.BytesReceived
+			if result.BytesReceived == 0 {
+				result.BytesReceived = server.BytesSent
+			}
+		}
+		// Set jitter/loss on legacy fields for non-bidir display
+		if result.JitterMs == 0 {
+			result.JitterMs = result.FwdJitterMs
+		}
+		if result.LostPackets == 0 && result.FwdLostPackets > 0 {
+			result.LostPackets = result.FwdLostPackets
+			result.LostPercent = result.FwdLostPercent
+			result.Packets = result.FwdPackets
+		}
 	}
 
 	return &result
+}
+
+// ParseDualtestOutput parses the output of iperf2 -d (dualtest) mode.
+// In dualtest mode, iperf2 runs both directions simultaneously. The output
+// interleaves two stream IDs: one for the forward (client→server) direction
+// and one for the reverse (server→client) direction.
+//
+// The forward stream is the client (sender) — lines have no jitter/loss.
+// The reverse stream is the local server (receiver) — lines may have jitter/loss for UDP.
+// Stream IDs are used to separate the two directions.
+func ParseDualtestOutput(text string) (*model.TestResult, error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("empty dualtest output")
+	}
+
+	lines := strings.Split(text, "\n")
+
+	// First pass: collect all parsed lines and discover stream IDs
+	type lineInfo struct {
+		parsed *parsedLine
+		raw    string
+	}
+	var allLines []lineInfo
+	streamIDs := map[int]bool{}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[SUM") {
+			continue // skip SUM lines, we'll build our own summaries
+		}
+		p, ok := parseSingleLine(trimmed)
+		if !ok {
+			continue
+		}
+		allLines = append(allLines, lineInfo{parsed: p, raw: trimmed})
+		streamIDs[p.streamID] = true
+	}
+
+	if len(allLines) == 0 {
+		return nil, fmt.Errorf("no parseable data in dualtest output")
+	}
+
+	// In dualtest mode, there are typically 2 stream IDs.
+	// The forward direction (client sending) has client-side lines (no UDP fields).
+	// The reverse direction (receiving) has server-side lines (with UDP fields for UDP tests).
+	// For TCP, both sides look similar — we separate by stream ID order:
+	// the first stream ID seen is the forward (client-initiated) direction.
+
+	// Determine which stream IDs are forward vs reverse.
+	// Forward (outgoing): the client stream — first ID encountered, typically lower.
+	// Reverse (incoming): the server-initiated stream — second ID, typically higher.
+	var fwdID, revID int
+	fwdSet := false
+	for _, li := range allLines {
+		if !fwdSet {
+			fwdID = li.parsed.streamID
+			fwdSet = true
+		} else if li.parsed.streamID != fwdID {
+			revID = li.parsed.streamID
+			break
+		}
+	}
+
+	// If only one stream ID found, treat all as forward
+	if revID == 0 && fwdSet {
+		revID = -1 // sentinel — no reverse data
+	}
+
+	// Separate lines by direction
+	var fwdLines, revLines []*parsedLine
+	for _, li := range allLines {
+		if li.parsed.streamID == fwdID {
+			fwdLines = append(fwdLines, li.parsed)
+		} else {
+			revLines = append(revLines, li.parsed)
+		}
+	}
+
+	// Build interval results for each direction
+	fwdIntervals := buildIntervals(fwdLines, false)
+	revIntervals := buildIntervals(revLines, true)
+
+	result := &model.TestResult{
+		Timestamp:        time.Now(),
+		Direction:        "Bidirectional",
+		Intervals:        fwdIntervals,
+		ReverseIntervals: revIntervals,
+	}
+
+	// Build summaries from the final (longest) intervals
+	if len(fwdLines) > 0 {
+		buildSummaryFromParsed(result, fwdLines, false)
+	}
+
+	// Reverse summary — the reverse stream is the local server (receiver side)
+	if len(revLines) > 0 {
+		var revResult model.TestResult
+		buildSummaryFromParsed(&revResult, revLines, true)
+		result.ReverseReceivedBps = revResult.ReceivedBps
+		if result.ReverseReceivedBps == 0 {
+			result.ReverseReceivedBps = revResult.FwdReceivedBps
+		}
+		result.ReverseBytesReceived = revResult.BytesReceived
+		result.ReverseJitterMs = revResult.JitterMs
+		if result.ReverseJitterMs == 0 {
+			result.ReverseJitterMs = revResult.FwdJitterMs
+		}
+		result.ReverseLostPackets = revResult.LostPackets
+		if result.ReverseLostPackets == 0 {
+			result.ReverseLostPackets = revResult.FwdLostPackets
+		}
+		result.ReversePackets = revResult.Packets
+		if result.ReversePackets == 0 {
+			result.ReversePackets = revResult.FwdPackets
+		}
+		result.ReverseLostPercent = revResult.LostPercent
+		if result.ReverseLostPercent == 0 {
+			result.ReverseLostPercent = revResult.FwdLostPercent
+		}
+	}
+
+	// Set actual duration
+	if len(result.Intervals) > 0 {
+		result.ActualDuration = result.Intervals[len(result.Intervals)-1].TimeEnd
+	} else if len(result.ReverseIntervals) > 0 {
+		result.ActualDuration = result.ReverseIntervals[len(result.ReverseIntervals)-1].TimeEnd
+	}
+
+	return result, nil
+}
+
+// buildIntervals groups parsed lines by time bucket and aggregates them into intervals.
+func buildIntervals(lines []*parsedLine, isServer bool) []model.IntervalResult {
+	type bucket struct {
+		lines []*parsedLine
+	}
+	buckets := map[float64]*bucket{}
+	var keys []float64
+
+	for _, p := range lines {
+		key := roundTime(p.timeStart)
+		b, exists := buckets[key]
+		if !exists {
+			b = &bucket{}
+			buckets[key] = b
+			keys = insertSorted(keys, key)
+		}
+		b.lines = append(b.lines, p)
+	}
+
+	var intervals []model.IntervalResult
+	for _, key := range keys {
+		b := buckets[key]
+		iv := aggregateInterval(b.lines, isServer)
+		if iv != nil {
+			intervals = append(intervals, *iv)
+		}
+	}
+	return intervals
 }
 
 // roundTime rounds a float64 time to the nearest 0.01 for use as a map key.

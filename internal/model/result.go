@@ -114,6 +114,7 @@ type TestResult struct {
 	PingLoaded           *PingResult
 	Error                string
 	Interrupted          bool // true if test was stopped by user before natural completion
+	FabricatedServerReport bool // true if UDP Server Report was fabricated (NAT blocked ACK)
 }
 
 // SentMbps returns the sent throughput in Mbps.

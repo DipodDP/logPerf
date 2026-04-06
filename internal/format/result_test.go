@@ -584,6 +584,97 @@ func TestFormatResultBidirUDP(t *testing.T) {
 	}
 }
 
+func TestFormatBidirInterval_NilFwd_TCP(t *testing.T) {
+	rev := &model.IntervalResult{
+		TimeStart:    0,
+		TimeEnd:      1,
+		Bytes:        117500000,
+		BandwidthBps: 940_000_000,
+		Retransmits:  2,
+	}
+
+	// Should not panic and should return zeros for fwd fields
+	out := FormatBidirInterval(nil, rev, false)
+
+	if out == "" {
+		t.Error("expected non-empty output")
+	}
+	// fwd Mbps and MB should be zero
+	if !strings.Contains(out, "0.00") {
+		t.Errorf("expected zero fwd values in output, got: %s", out)
+	}
+	// rev Mbps should be non-zero (940 Mbps)
+	if !strings.Contains(out, "940.00") {
+		t.Errorf("expected rev bandwidth in output, got: %s", out)
+	}
+}
+
+func TestFormatBidirInterval_NilFwd_UDP(t *testing.T) {
+	rev := &model.IntervalResult{
+		TimeStart:    0,
+		TimeEnd:      1,
+		Bytes:        125000,
+		BandwidthBps: 1_000_000,
+		Packets:      50,
+		LostPackets:  2,
+		LostPercent:  4.0,
+		JitterMs:     0.123,
+	}
+
+	// Should not panic for UDP mode either
+	out := FormatBidirInterval(nil, rev, true)
+
+	if out == "" {
+		t.Error("expected non-empty output")
+	}
+	// fwd Mbps should be zero
+	if !strings.Contains(out, "0.00") {
+		t.Errorf("expected zero fwd Mbps in output, got: %s", out)
+	}
+	// rev jitter and loss should be present
+	if !strings.Contains(out, "0.123") {
+		t.Errorf("expected rev jitter in output, got: %s", out)
+	}
+}
+
+func TestFormatResultUDPFabricatedServerReport(t *testing.T) {
+	r := &model.TestResult{
+		Timestamp:              time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
+		ServerAddr:             "192.168.1.1",
+		Port:                   5201,
+		Protocol:               "UDP",
+		Parallel:               1,
+		Duration:               10,
+		SentBps:                7_340_000,
+		JitterMs:               0,
+		LostPackets:            0,
+		LostPercent:            0,
+		Packets:                6250,
+		FabricatedServerReport: true,
+		Streams: []model.StreamResult{
+			{ID: 1, SentBps: 7_340_000, Packets: 6250},
+		},
+	}
+
+	out := FormatResult(r)
+
+	// Jitter and Packet Loss should show N/A when server report was fabricated
+	if !strings.Contains(out, "Jitter:          N/A") {
+		t.Errorf("expected 'Jitter: N/A' for fabricated server report, got: %s", out)
+	}
+	if !strings.Contains(out, "Packet Loss:     N/A") {
+		t.Errorf("expected 'Packet Loss: N/A' for fabricated server report, got: %s", out)
+	}
+	// Should mention NAT as the reason
+	if !strings.Contains(out, "NAT") {
+		t.Errorf("expected NAT explanation in output, got: %s", out)
+	}
+	// Should not show numeric jitter or loss values
+	if strings.Contains(out, "0.000 ms") {
+		t.Error("should not show 0.000 ms jitter when report is fabricated")
+	}
+}
+
 func TestFormatResultError(t *testing.T) {
 	r := &model.TestResult{
 		Timestamp:  time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),

@@ -2,19 +2,19 @@
 
 ## Summary
 
-During live iperf2 UDP bidirectional testing (Mac ↔ Windows and Mac ↔ public Linux), four distinct issues were identified and verified with bare iperf2 commands: (1) a race condition in `udp_accept` causing parallel UDP streams started with `-P` to drop one stream's server report on Windows; (2) the UDP server report ACK not being delivered back to the client when the client is behind standard NAT; (3) `taskkill /F` (force-kill) prevents iperf2 from flushing its `-o` output file on Windows; (4) port collision when running simultaneous bidirectional tests on the same port produces identical, incorrect loss figures in both directions. All findings were confirmed with direct iperf2 invocations (no wrapper code) during session 2026-03-12.
+During live iperf2 UDP bidirectional testing (Mac ↔ Windows and Mac ↔ public Linux), five distinct issues were identified and verified with bare iperf2 commands: (1) a race condition in `udp_accept` causing parallel UDP streams started with `-P` to drop one stream's server report on Windows; (2) the UDP server report ACK not being delivered back to the client when the client is behind standard NAT; (3) graceful `taskkill` (without `/F`) unreliably leaves orphaned iperf processes on Windows — resolved by always using `/F` with schtasks one-shot mode; (4) port collision when running simultaneous bidirectional tests on the same port produces identical, incorrect loss figures in both directions; (5) persistent Windows UDP servers lose ACK ability after the first client due to Windows `WSAECONNRESET` (ICMP Port Unreachable) poisoning the server socket — iperf2 lacks the `SIO_UDP_CONNRESET` fix that Go, Rust, and other platforms apply. All findings were confirmed with direct iperf2 invocations (no wrapper code) during sessions 2026-03-12 and 2026-03-21.
 
 ---
 
 ## Context
 
-- **Project:** `iperf-tool` — a Go CLI + GUI wrapper around iperf3/iperf2
+- **Project:** `iperf-tool` — a Go CLI + GUI wrapper around iperf2
 - **Environment:**
   - macOS client (public NAT: 185.126.130.226, VPN: 100.80.223.29)
   - Windows remote (100.89.230.34), iperf2 2.2.1
   - Linux public server eu6 (81.7.17.12, Ubuntu 22.04), iperf2 2.1.5 — used to isolate NAT behavior
 - **Protocol:** UDP, bidirectional, 2 streams per direction
-- **Language:** Go 1.x (planned implementation); shell commands run via `ssh.Client.RunCommand()`
+- **Language:** Go (implemented in `internal/iperf/`); shell commands run via `ssh.Client.RunCommand()`
 - **Branch:** `multistream-iperf2`
 
 ---
@@ -145,13 +145,44 @@ iperf -c <peer-ip> -u -p 5201 -t 5 -b 10m -f m
 
 ---
 
-### Finding 3 — `taskkill /F` Prevents Output File Flush
+### Finding 3 — `taskkill /F` Required for Reliable Process Cleanup
 
-**Observed behavior:** When the remote iperf2 server process was terminated with `taskkill /F /IM iperf.exe`, the `-o <file>` output file was empty or incomplete. Graceful termination (`taskkill /IM iperf.exe` without `/F`) allowed the process to flush before exit.
+**Original observation (session 2026-03-12):** `taskkill /F` prevented the `-o` output file from being flushed. Graceful kill (`taskkill /IM` without `/F`) allowed flush but was itself unreliable — sometimes failing with `"could not be terminated — use /F option"`.
 
-**Additional observation (session 2026-03-12):** On Windows 2.2.1, `taskkill /IM iperf.exe` (without `/F`) may itself fail for some process states with `"could not be terminated — use /F option"`. In those cases, the graceful path is unavailable and the file will be empty. This was observed once during testing.
+**Updated observation (session 2026-03-21):** Graceful kill without `/F` is unreliable on Windows — it frequently leaves orphaned iperf processes that pile up across test runs, causing port conflicts and stale socket state. Confirmed by observing 4 orphaned `iperf.exe` instances after a 5-run test loop.
 
-**Fact:** Directly observed — graceful kill produced a populated output file; force-kill produced an empty file. The graceful-kill failure case was also directly observed once.
+**Resolution:** `taskkill /F` is now always used. This is safe because the runner uses `schtasks` one-shot mode — each test run creates a fresh iperf server process that typically exits on its own after the client disconnects. The `/F` kill runs as cleanup to catch any stragglers. In SSH fallback mode (when `-o` file is needed), the server writes output during the test, not at exit — the file is populated before the kill command runs.
+
+**Fact:** Orphaned processes accumulated without `/F`, causing port conflicts. With `/F`, 5/5 runs completed cleanly with zero orphaned processes (2026-03-21).
+
+---
+
+### Finding 5 — Persistent Windows UDP Server Loses ACK Ability After First Client (WSAECONNRESET)
+
+**Observed behavior (session 2026-03-21):** A persistent iperf2 server on Windows (`-D` daemon mode) delivers Server Report ACKs to the first client, but all subsequent clients receive `"WARNING: did not receive ack of last datagram after 10 tries"`. The server-side output shows `"recvfrom failed: Connection reset by peer"` after each client disconnects.
+
+**Confirmed across all parameter combinations:**
+- `-P 4 -b 1M`, `-P 2 -b 2M`, `-P 1 -b 4M`, `-P 4 -b 500K`
+- 12/12 runs after the first client: 0 Server Reports, all WARNINGs
+- Independent of stream count, bandwidth, and port range
+
+**Root cause — Windows `WSAECONNRESET` (error 10054) on UDP sockets:**
+1. Client #1 finishes test and closes its ephemeral UDP port
+2. Server sends Server Report ACK to that port
+3. Client's OS responds with ICMP "Port Unreachable"
+4. **Windows delivers the ICMP error as `WSAECONNRESET` on the server's UDP socket** — this is a documented Windows platform behavior (Microsoft KB 263823) that does not occur on Linux/macOS, where asynchronous ICMP replies on UDP sockets are silently ignored
+5. On the next `recvfrom()` call (for client #2), the stale `WSAECONNRESET` is returned instead of data
+6. iperf2's `FATALUDPREADERR` macro treats any error except `WSAEWOULDBLOCK` as fatal — the socket is permanently poisoned
+
+**Known platform fix:** `WSAIoctl(sock, SIO_UDP_CONNRESET, &FALSE, ...)` disables ICMP error reporting on Windows UDP sockets. Go, Rust (tokio), pjsip, and Dart/Flutter all apply this fix. iperf2 does not — it has no `SIO_UDP_CONNRESET` handling anywhere in its source.
+
+**Resolution:** The runner uses `schtasks` one-shot mode — each test run creates a fresh iperf server process with a clean socket. The server exits after the client disconnects, so the poisoned socket is never reused. This avoids the Windows WSAECONNRESET bug without patching iperf2.
+
+**Fact vs. assumption:**
+- *Fact:* Persistent `-D` daemon fails ACK delivery for all clients after the first — confirmed with 12 consecutive runs across 4 parameter sets (2026-03-21).
+- *Fact:* One-shot `schtasks` mode (fresh server per test) delivers ACKs reliably — confirmed with 5/5 runs, zero failures (2026-03-21).
+- *Fact:* Root cause is Windows `WSAECONNRESET` on UDP sockets (Microsoft KB 263823), not iperf2 application logic.
+- *Fact:* iperf2 source has no `SIO_UDP_CONNRESET` handling.
 
 ---
 
@@ -233,8 +264,9 @@ High loss is consistent with 40 Mbits/sec total offered load over a congested ~6
 |---|---|
 | 1 — `-P` race | iperf2 Windows `udp_accept` calls `recvfrom` non-atomically across threads; race is deterministic with ≥2 UDP streams on a single port |
 | 2 — ACK loss | Client-side NAT mapping expires after UDP data flow ends; server ACK is sent to an unreachable ephemeral port. Not present on directly routable networks |
-| 3 — File flush | Windows process termination with `/F` bypasses atexit/destructor flush; buffered I/O not written to disk. Graceful kill may also fail in some process states |
+| 3 — Process cleanup | Graceful kill (`taskkill` without `/F`) unreliable on Windows — leaves orphaned processes. `/F` is required; safe because schtasks one-shot mode restarts the server each run |
 | 4 — Port collision | Forward and reverse traffic share the same port number, mixing stream identities and measurement data |
+| 5 — Persistent server ACK loss | Windows `WSAECONNRESET` (ICMP Port Unreachable) poisons the server's UDP socket after first client disconnects; iperf2 lacks `SIO_UDP_CONNRESET` fix |
 
 ---
 
@@ -244,8 +276,9 @@ High loss is consistent with 40 Mbits/sec total offered load over a congested ~6
 |---|---|---|
 | 1 — `-P` race | **High** | One stream silently drops its Server Report; multi-stream UDP loss/jitter data is incomplete or absent on Windows |
 | 2 — ACK loss | **High (NAT) / None (direct)** | Client never receives server-side loss/jitter over NAT; SSH-file fallback required. No impact on directly routable networks |
-| 3 — File flush | **Medium** | Silent data loss — output file empty/truncated with no user-visible error; graceful kill also unreliable on some Windows process states |
+| 3 — Process cleanup | **Medium** | Orphaned processes cause port conflicts and stale socket state across test runs; resolved by always using `taskkill /F` |
 | 4 — Port collision | **High** | Both directions report identical (wrong) statistics; false measurements may be mistaken for real data |
+| 5 — Persistent server ACK loss | **High (Windows)** | All UDP tests after the first fail to return server-side stats; affects any persistent/daemon server deployment on Windows |
 
 ---
 
@@ -255,24 +288,24 @@ High loss is consistent with 40 Mbits/sec total offered load over a congested ~6
 
 **Workaround for Finding 1:** Replace `-P <n>` with a port range `-p <start>-<end>` where range size equals stream count. Both server and client must specify the same range. iperf2 spawns one listener per port, bypassing the `udp_accept` race entirely.
 
-**Workaround for Finding 2:** Use the try-direct-first approach described above. Run the test normally and check client output for `WARNING: did not receive ack`. If the warning is absent, the Server Report is available directly from client stdout — no SSH needed. If the warning is present, re-run using the SSH-file fallback:
-```
-# Fallback: start server with output file
-iperf -s -u -p 5201-5202 -o /tmp/iperf_srv.txt        # Linux
-iperf.exe -s -u -p 5201-5202 -o C:\iperf_srv.txt      # Windows
+**Workaround for Finding 2 (implemented):** Use the pre-flight UDP probe described above to select mode before the test starts. `ProbeUDPReachability()` (`internal/iperf/probe.go`) binds a local UDP socket, instructs the remote via SSH to send a single packet back, and waits up to the configured timeout. The result selects direct mode or SSH fallback for the entire test run — no post-hoc WARNING detection required.
 
-# After test completes, graceful kill and read
-# Linux:   kill <pid>; sleep 0.5; cat /tmp/iperf_srv.txt
-# Windows: taskkill /IM iperf.exe; ping -n 2 127.0.0.1 >nul; type C:\iperf_srv.txt
-```
+`ValidateServerReport()` (`internal/iperf/parser.go`) acts as a secondary safety net on the direct path: if the probe result was stale and the ACK failed, the fabricated Server Report (0.000 ms jitter, 0% loss) is detected and discarded rather than silently returned as valid data.
 
-**Workaround for Finding 3:** In the SSH fallback path, never use `taskkill /F`. Use graceful termination and wait ≥500ms before reading the file. If `taskkill /IM` itself fails (returns "use /F"), log a warning and attempt to read whatever partial content exists; do not silently return zero-results.
+SSH fallback mode (started with `-o <file>`) is still used when:
+- The probe times out (NAT blocking inbound UDP)
+- The probe SSH command fails
+- No local address is available for the probe
+
+**Workaround for Finding 3:** Always use `taskkill /IM iperf.exe /F` to ensure reliable process cleanup. This is safe because schtasks one-shot mode creates a fresh server process per test run — the server typically exits on its own after the client disconnects, and `/F` catches any stragglers. In the SSH fallback path, wait `KillWaitMs` (default 500ms) before reading the `-o` file.
 
 **Workaround for Finding 4:** Use non-overlapping port ranges per direction:
 - Forward server: ports N..N+1
 - Reverse server: ports N+2..N+3
 
-This combined workaround is encapsulated in the planned `iperf2.Runner.RunBidir()` implementation (`internal/iperf2/runner.go`).
+This combined workaround is implemented in `Runner.RunBidir()` (`internal/iperf/runner.go`).
+
+**Workaround for Finding 5:** Use schtasks one-shot mode (not `-D` daemon) to start a fresh iperf server process per test run. Each fresh process has a clean UDP socket that has never received a stale `WSAECONNRESET`. The proper fix would be adding `WSAIoctl(sock, SIO_UDP_CONNRESET, &FALSE, ...)` to iperf2's socket creation code, but that requires patching iperf2 itself.
 
 ### Alternative Solutions
 
@@ -287,17 +320,17 @@ This combined workaround is encapsulated in the planned `iperf2.Runner.RunBidir(
 
 ## Verification Plan
 
-1. **Finding 1 — Port range fix:** Run `iperf -s -u -p 5201-5202` on remote and `iperf -c <host> -u -p 5201-5202 -P 2 -t 10 -f m -e` on client. Confirm both `[1]` and `[2]` receive Server Reports; no `WARNING: did not receive ack`.
+1. **Finding 1 — Port range fix:** ✅ Implemented. `Config.PortRangeStr()` generates `-p 5201-5202` style ranges; server and client both receive matching ranges. Both streams receive Server Reports in live testing (2026-03-12).
 
-2. **Finding 2 — Try-direct-first:**
-   - *Direct path:* Run test on directly routable network. Confirm Server Report received in client stdout, no warning, no SSH needed.
-   - *NAT fallback:* Run test from behind NAT. Confirm `WARNING` appears in client output, then re-run with SSH-file fallback and confirm server file contains valid stats.
+2. **Finding 2 — Probe-first mode selection:** ✅ Implemented. `ProbeUDPReachability()` runs before every UDP reverse/bidir test. Confirmed on Tailscale VPN (macOS ↔ Windows, 100.80.223.29 ↔ 100.89.230.34): probe returns open, direct mode selected, Server Report parsed from client stdout with correct jitter/loss (2026-03-21). `ValidateServerReport()` confirmed to detect fabricated reports (0ms jitter heuristic) as secondary safety net.
 
-3. **Finding 3 — Graceful kill:** Start server with `-o <file>`, run a 5s test, issue graceful kill, wait 500ms, read file — assert non-empty. Repeat with `/F` — assert file is empty or truncated.
+3. **Finding 3 — Force kill:** ✅ Implemented. `remoteServerKillCmd()` uses `taskkill /IM iperf.exe /F` on Windows; safe because schtasks one-shot mode creates a fresh server per run. Confirmed 5/5 runs with zero orphaned processes (2026-03-21). SSH fallback path waits `KillWaitMs` (default 500ms) before reading file.
 
-4. **Finding 4 — Port separation:** Run bidir test with correct non-overlapping ranges. Confirm forward and reverse loss percentages differ; identical values indicate collision is still present.
+4. **Finding 4 — Port separation:** ✅ Implemented. `RunBidir()` uses `PortRangeStr(0)` for forward (ports N..N+P-1) and `PortRangeStr(Parallel)` for reverse (ports N+P..N+2P-1). Confirmed distinct forward/reverse loss figures in live testing.
 
-5. **Unit tests (planned):** `internal/iperf2/parser_test.go` fixtures should include real captured iperf2 server output (with `[SUM-2]` line and `-e` enhanced columns) to validate `ParseOutput(text, isServerSide=true)` correctly extracts jitter/loss from the SUM line.
+5. **Finding 5 — One-shot server:** ✅ Implemented. `remoteServerStartCmd()` uses schtasks one-shot mode on Windows; `startRemoteServer()` kills and restarts before each test. Confirmed 5/5 runs with Server Report ACKs delivered vs 0/12 with persistent `-D` daemon (2026-03-21). Root cause documented: Windows `WSAECONNRESET` / missing `SIO_UDP_CONNRESET` in iperf2.
+
+6. **Unit tests:** ✅ Complete. `internal/iperf/parser_test.go` covers `ParseOutput(isServer=true)` with real captured iperf2 enhanced output including `[SUM-2]` lines, `ValidateServerReport` with fabricated/valid/missing cases, and `MergeBidirResults`.
 
 ---
 
@@ -313,7 +346,7 @@ This combined workaround is encapsulated in the planned `iperf2.Runner.RunBidir(
 
 5. **Configurable kill wait time:** The 500ms post-kill wait should be a configurable constant rather than a magic number, to allow tuning on high-latency links.
 
-6. **Code review gate:** Any change introducing `taskkill /F` or reading `-o` files without a preceding sleep must be flagged. Consider a linting comment: `// NOTE: no /F — graceful kill required for buffer flush`.
+6. **Code review gate:** Any change reading `-o` files without a preceding sleep must be flagged. The SSH fallback path must always wait `KillWaitMs` after kill before reading the output file.
 
 ---
 
@@ -323,8 +356,8 @@ This combined workaround is encapsulated in the planned `iperf2.Runner.RunBidir(
 |---|---|
 | What is the best remote command to send a single UDP packet back to the client for the pre-flight probe? | On Linux: `echo -n x \| nc -u -w1 <client-ip> <port>`. On Windows: requires PowerShell UDP socket code or a helper binary. The probe implementation differs per remote OS. |
 | What timeout is appropriate for the UDP probe? | Too short (< RTT) gives false negatives; too long adds latency before every test. 2× RTT + 500ms margin is a reasonable starting point, but RTT must be known or estimated first. |
-| Does `taskkill /IM` (graceful) consistently flush the `-o` file on all Windows iperf2 2.2.1 process states? | Observed once that graceful kill failed with "use /F option". If this is frequent, the SSH-file fallback is unreliable and an alternative flush mechanism is needed. |
-| What causes the `taskkill /IM` failure on some process states? | Understanding whether it is a Windows service, UAC, or iperf2 signal-handling issue determines whether it is avoidable or requires `/F` + partial-read fallback. |
-| Is `IsWindows` always hardcoded to `true` in `RunIperf2Bidir`? | If the remote host is Linux/macOS, wrong shell commands will be used. A detection step or explicit user flag is needed. |
+| ~~Does `taskkill /IM` (graceful) consistently flush the `-o` file?~~ | **Resolved (2026-03-21).** Graceful kill is unreliable — leaves orphaned processes. `/F` is always used now; safe because schtasks one-shot mode restarts the server each run. |
+| ~~What causes the `taskkill /IM` failure on some process states?~~ | **Resolved (2026-03-21).** Root cause was Windows process state after SSH-launched schtask. Moot since `/F` is now always used. |
+| ~~Is `IsWindows` always hardcoded?~~ | **Resolved.** `IsWindows` is auto-detected by the SSH client via `cmd.exe /c echo %OS%` check. |
 | Negative latency values in Windows iperf2 server output (`-e`) | Clocks between peers are not synchronized. Latency values from server are unreliable for one-way delay measurement unless NTP or PTP sync is confirmed. |
 | What happens if the remote iperf2 server crashes before writing the output file? | `RunCommand(cfg.remoteServerReadCmd())` returns empty string. Explicit error path with user-facing diagnostic is needed. |

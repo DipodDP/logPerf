@@ -8,22 +8,29 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"iperf-tool/internal/model"
 )
 
-const DebugLogPath = "/tmp/iperf-debug.log"
+var DebugLogPath = filepath.Join(os.TempDir(), "iperf-debug.log")
 
 // SSHClient is the interface for executing commands on a remote host.
 // Satisfied by *ssh.Client from internal/ssh/client.go.
 type SSHClient interface {
 	RunCommand(cmd string) (string, error)
 }
+
+// LocalAddrProvider is an optional interface that SSHClient implementations
+// may satisfy to expose the local IP address of their connection.
+type LocalAddrProvider interface {
+	LocalAddr() string
+}
+
 
 // Runner executes iperf2 commands.
 type Runner struct {
@@ -32,16 +39,49 @@ type Runner struct {
 	fwdCmd      *exec.Cmd
 	stopped     bool
 	debug       bool
+	onStatus    StatusCallback // optional callback for status/log messages
 }
+
+// StatusCallback is a function that receives status/log messages from the runner.
+// Used to route probe and progress messages to the GUI output view.
+type StatusCallback func(msg string)
 
 // NewRunner creates a new Runner.
 func NewRunner() *Runner {
 	return &Runner{}
 }
 
+// defaultRemoteOutputFile returns a sensible default path for the remote server
+// output file based on the remote OS.
+func defaultRemoteOutputFile(isWindows bool) string {
+	if isWindows {
+		return `C:\iperf2_server_output.txt`
+	}
+	return "/tmp/iperf2_server_output.txt"
+}
+
+// logStatus sends a status message to the onInterval callback as a nil-interval
+// signal, or falls back to stderr if no callback is available.
+func (r *Runner) logStatus(onInterval func(fwd, rev *model.IntervalResult), format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	// Status messages are printed to stderr as a fallback (CLI mode)
+	fmt.Fprintln(os.Stderr, msg)
+	// The GUI hooks into onInterval; we use the StatusCallback on the runner if set.
+	if r.onStatus != nil {
+		r.onStatus(msg)
+	}
+}
+
 // NewDebugRunner creates a Runner that logs raw output to DebugLogPath.
 func NewDebugRunner() *Runner {
 	return &Runner{debug: true}
+}
+
+// SetStatusCallback sets a callback for status/log messages (probe results,
+// progress updates). This routes messages to the GUI output view instead of
+// printing to stdout/stderr.
+func (r *Runner) SetStatusCallback(cb StatusCallback) {
+	r.onStatus = cb
 }
 
 // nopWriteCloser wraps io.Discard as an io.WriteCloser.
@@ -67,16 +107,16 @@ func (r *Runner) debugWriter(label string, args []string) (io.WriteCloser, func(
 	return f, logf
 }
 
-// Stop sends SIGTERM to running local processes.
+// Stop terminates running local processes.
 func (r *Runner) Stop() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.stopped = true
 	if r.fwdCmd != nil && r.fwdCmd.Process != nil {
-		r.fwdCmd.Process.Signal(syscall.SIGTERM)
+		stopProcess(r.fwdCmd.Process)
 	}
 	if r.localSrvCmd != nil && r.localSrvCmd.Process != nil {
-		r.localSrvCmd.Process.Signal(syscall.SIGTERM)
+		stopProcess(r.localSrvCmd.Process)
 	}
 }
 
@@ -102,6 +142,36 @@ func (r *Runner) RunForward(ctx context.Context, cfg Config, sshCli SSHClient, o
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
+	// For UDP forward tests with SSH, probe reachability to decide direct vs fallback.
+	if sshCli != nil && cfg.Protocol == "udp" && !cfg.SkipProbe {
+		localAddr := cfg.LocalAddr
+		if localAddr == "" {
+			if lap, ok := sshCli.(LocalAddrProvider); ok {
+				localAddr = lap.LocalAddr()
+			}
+		}
+		if localAddr != "" {
+			isOpen, err := ProbeUDPReachability(ctx, sshCli, localAddr, cfg.ProbeTimeout, cfg.IsWindows, cfg.IPv6)
+			if err != nil {
+				r.logStatus(onInterval, "iperf probe warning: %v — using SSH fallback", err)
+				cfg.SSHFallback = true
+			} else if isOpen {
+				r.logStatus(onInterval, "UDP reachability probe: open — using direct mode")
+				cfg.SSHFallback = false
+			} else {
+				r.logStatus(onInterval, "UDP reachability probe: blocked — using SSH fallback")
+				cfg.SSHFallback = true
+			}
+		} else {
+			cfg.SSHFallback = true
+		}
+	} else if sshCli != nil && cfg.Protocol == "udp" && cfg.SkipProbe {
+		// Probe skipped: honour whatever SSHFallback the caller set.
+	}
+	if sshCli != nil && cfg.Protocol == "udp" && cfg.RemoteOutputFile == "" {
+		cfg.RemoteOutputFile = defaultRemoteOutputFile(cfg.IsWindows)
+	}
+
 	// Start remote server if SSH is available
 	if sshCli != nil {
 		if err := r.startRemoteServer(cfg, sshCli); err != nil {
@@ -123,7 +193,7 @@ func (r *Runner) RunForward(ctx context.Context, cfg Config, sshCli SSHClient, o
 		return nil, fmt.Errorf("parse client output: %w", err)
 	}
 
-	// Get server-side data
+	// Get server-side data: try Server Report first, fall back to SSH file read
 	var serverResult *model.TestResult
 	if sshCli != nil && cfg.SSHFallback {
 		serverOutput, readErr := r.readRemoteServerOutput(cfg, sshCli)
@@ -131,11 +201,19 @@ func (r *Runner) RunForward(ctx context.Context, cfg Config, sshCli SSHClient, o
 			serverResult, _ = ParseOutput(serverOutput, true)
 		}
 	} else {
-		// Validate Server Report from client output
 		status := ValidateServerReport(clientOutput)
 		if status == ServerReportValid {
-			// Parse server data embedded in client output
 			serverResult, _ = parseServerReportFromClient(clientOutput)
+		} else if status == ServerReportFabricated {
+			clientResult.FabricatedServerReport = true
+		}
+		// Server Report unavailable — fall back to SSH file read
+		if serverResult == nil && sshCli != nil && cfg.RemoteOutputFile != "" {
+			serverOutput, readErr := r.readRemoteServerOutput(cfg, sshCli)
+			if readErr == nil && strings.TrimSpace(serverOutput) != "" {
+				serverResult, _ = ParseOutput(serverOutput, true)
+				clientResult.FabricatedServerReport = false
+			}
 		}
 	}
 
@@ -152,7 +230,24 @@ func (r *Runner) RunReverse(ctx context.Context, cfg Config, sshCli SSHClient, o
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	if sshCli == nil {
-		return nil, fmt.Errorf("SSH client required for reverse tests")
+		return nil, fmt.Errorf("SSH connection required for reverse tests (iperf2 has no built-in -R flag; use --ssh to control the remote client)")
+	}
+
+	if cfg.Protocol == "udp" && !cfg.SkipProbe {
+		localAddr := cfg.LocalAddr
+		if localAddr == "" {
+			if lap, ok := sshCli.(LocalAddrProvider); ok {
+				localAddr = lap.LocalAddr()
+			}
+		}
+		if localAddr != "" {
+			isOpen, err := ProbeUDPReachability(ctx, sshCli, localAddr, cfg.ProbeTimeout, cfg.IsWindows, cfg.IPv6)
+			if err != nil {
+				r.logStatus(onInterval, "iperf probe warning: %v", err)
+			} else if !isOpen {
+				r.logStatus(onInterval, "UDP reachability probe: blocked (reverse test will fail to receive data)")
+			}
+		}
 	}
 
 	// Kill any leftover remote iperf
@@ -180,7 +275,7 @@ func (r *Runner) RunReverse(ctx context.Context, cfg Config, sshCli SSHClient, o
 
 	// Stop local server
 	if localSrvCmd.Process != nil {
-		localSrvCmd.Process.Signal(syscall.SIGTERM)
+		stopProcess(localSrvCmd.Process)
 	}
 	localSrvCmd.Wait()
 	r.mu.Lock()
@@ -230,7 +325,41 @@ func (r *Runner) RunBidir(ctx context.Context, cfg Config, sshCli SSHClient, onI
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	if sshCli == nil {
-		return nil, fmt.Errorf("SSH client required for bidirectional tests")
+		return nil, fmt.Errorf("SSH connection required for SSH-controlled bidirectional tests (use RunBidirDualtest for no-SSH dualtest mode)")
+	}
+
+	// For UDP bidir tests, run a pre-flight UDP reachability probe to decide
+	// whether to use direct mode (Server Report from client stdout) or SSH
+	// file fallback. ValidateServerReport acts as a secondary safety net on
+	// the direct path in case the probe result was stale.
+	if cfg.Protocol == "udp" && !cfg.SkipProbe {
+		localAddr := cfg.LocalAddr
+		if localAddr == "" {
+			if lap, ok := sshCli.(LocalAddrProvider); ok {
+				localAddr = lap.LocalAddr()
+			}
+		}
+		if localAddr != "" {
+			isOpen, err := ProbeUDPReachability(ctx, sshCli, localAddr, cfg.ProbeTimeout, cfg.IsWindows, cfg.IPv6)
+			if err != nil {
+				r.logStatus(onInterval, "iperf probe warning: %v — using SSH fallback", err)
+				cfg.SSHFallback = true
+			} else if isOpen {
+				r.logStatus(onInterval, "UDP reachability probe: open — using direct mode")
+				cfg.SSHFallback = false
+			} else {
+				r.logStatus(onInterval, "UDP reachability probe: blocked — using SSH fallback")
+				cfg.SSHFallback = true
+			}
+		} else {
+			// No local addr available — default to SSH fallback to be safe
+			cfg.SSHFallback = true
+		}
+	} else if cfg.Protocol == "udp" && cfg.SkipProbe {
+		// Probe skipped: honour whatever SSHFallback the caller set (default false).
+	}
+	if cfg.Protocol == "udp" && cfg.RemoteOutputFile == "" {
+		cfg.RemoteOutputFile = defaultRemoteOutputFile(cfg.IsWindows)
 	}
 
 	// Kill any leftover remote iperf
@@ -285,7 +414,7 @@ func (r *Runner) RunBidir(ctx context.Context, cfg Config, sshCli SSHClient, onI
 
 	// Stop local server
 	if localSrvCmd.Process != nil {
-		localSrvCmd.Process.Signal(syscall.SIGTERM)
+		stopProcess(localSrvCmd.Process)
 	}
 	localSrvCmd.Wait()
 	r.mu.Lock()
@@ -294,14 +423,12 @@ func (r *Runner) RunBidir(ctx context.Context, cfg Config, sshCli SSHClient, onI
 
 	localSrvOutput := localSrvBuf.String()
 
-	// Get remote server data
+	// Kill remote server and read output file (always available for UDP bidir).
+	sshCli.RunCommand(cfg.remoteServerKillCmd())
+	time.Sleep(time.Duration(cfg.KillWaitMs) * time.Millisecond)
 	var remoteSrvOutput string
-	if cfg.SSHFallback {
-		sshCli.RunCommand(cfg.remoteServerKillCmd()) // graceful kill
-		time.Sleep(time.Duration(cfg.KillWaitMs) * time.Millisecond)
+	if cfg.RemoteOutputFile != "" {
 		remoteSrvOutput, _ = sshCli.RunCommand(cfg.remoteServerReadCmd())
-	} else {
-		sshCli.RunCommand(cfg.remoteServerKillCmd())
 	}
 
 	// Parse all outputs
@@ -314,14 +441,16 @@ func (r *Runner) RunBidir(ctx context.Context, cfg Config, sshCli SSHClient, onI
 		fwdClientResult = &model.TestResult{Timestamp: time.Now()}
 	}
 
-	if cfg.SSHFallback && strings.TrimSpace(remoteSrvOutput) != "" {
-		fwdServerResult, _ = ParseOutput(remoteSrvOutput, true)
-	} else if fwdOut.err == nil {
-		// Try to get server data from client's Server Report
+	if fwdOut.err == nil && !cfg.SSHFallback {
+		// Try direct mode first: get server data from client's Server Report
 		status := ValidateServerReport(fwdOut.output)
 		if status == ServerReportValid {
 			fwdServerResult, _ = parseServerReportFromClient(fwdOut.output)
 		}
+	}
+	// Fall back to SSH file read if direct mode failed or SSHFallback was set
+	if fwdServerResult == nil && strings.TrimSpace(remoteSrvOutput) != "" {
+		fwdServerResult, _ = ParseOutput(remoteSrvOutput, true)
 	}
 
 	if revOut.err == nil && strings.TrimSpace(revOut.output) != "" {
@@ -358,6 +487,67 @@ func (r *Runner) RunBidir(ctx context.Context, cfg Config, sshCli SSHClient, onI
 	return merged, nil
 }
 
+// RunBidirDualtest runs a bidirectional test using iperf2's native -d (dualtest)
+// flag. No SSH connection is needed — the remote server connects back to the
+// local client. Both directions run simultaneously in a single process.
+func (r *Runner) RunBidirDualtest(ctx context.Context, cfg Config, onInterval func(fwd, rev *model.IntervalResult)) (*model.TestResult, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
+	r.logStatus(onInterval, "Starting iperf2 bidirectional dualtest (-d) — server must be able to reach this client (no NAT)")
+
+	clientArgs := cfg.dualtestClientArgs()
+	clientOutput, err := r.runLocalClient(ctx, cfg.BinaryPath, clientArgs, nil)
+	if err != nil {
+		// Check for common NAT-blocked error patterns
+		if strings.Contains(err.Error(), "connect failed") ||
+			strings.Contains(err.Error(), "unable to connect") ||
+			strings.Contains(err.Error(), "Connection refused") {
+			return nil, fmt.Errorf("iperf2 dualtest failed — server could not connect back.\n"+
+				"This usually means NAT is blocking inbound connections.\n"+
+				"Connect via SSH to use the SSH-controlled bidirectional mode instead.\n"+
+				"Original error: %w", err)
+		}
+		return nil, fmt.Errorf("dualtest client: %w", err)
+	}
+
+	// Check for reverse connect failure (iperf2 exits 0 but prints error)
+	if strings.Contains(clientOutput, "expected reverse connect did not occur") {
+		return nil, fmt.Errorf("iperf2 dualtest failed — server could not connect back.\n" +
+			"This usually means NAT is blocking inbound connections.\n" +
+			"Connect via SSH to use the SSH-controlled bidirectional mode instead.")
+	}
+
+	// Parse dualtest output — iperf2 -d interleaves forward and reverse streams
+	result, err := ParseDualtestOutput(clientOutput)
+	if err != nil {
+		return nil, fmt.Errorf("parse dualtest output: %w", err)
+	}
+
+	// Fire onInterval callbacks (post-test replay)
+	if onInterval != nil {
+		fwdIvs := result.Intervals
+		revIvs := result.ReverseIntervals
+		maxLen := len(fwdIvs)
+		if len(revIvs) > maxLen {
+			maxLen = len(revIvs)
+		}
+		for i := 0; i < maxLen; i++ {
+			var fwd, rev *model.IntervalResult
+			if i < len(fwdIvs) {
+				fwd = &fwdIvs[i]
+			}
+			if i < len(revIvs) {
+				rev = &revIvs[i]
+			}
+			onInterval(fwd, rev)
+		}
+	}
+
+	return result, nil
+}
+
 // startRemoteServer kills leftover iperf and starts the remote server.
 func (r *Runner) startRemoteServer(cfg Config, sshCli SSHClient) error {
 	// Kill any leftover
@@ -372,7 +562,7 @@ func (r *Runner) startRemoteServer(cfg Config, sshCli SSHClient) error {
 	return nil
 }
 
-// killRemoteServer sends a graceful kill to the remote iperf server.
+// killRemoteServer sends a kill to the remote iperf server.
 func (r *Runner) killRemoteServer(cfg Config, sshCli SSHClient) {
 	sshCli.RunCommand(cfg.remoteServerKillCmd())
 }
@@ -435,6 +625,11 @@ func (r *Runner) runLocalClient(ctx context.Context, binaryPath string, args []s
 
 	if waitErr != nil && !userStopped && buf.Len() == 0 {
 		return "", fmt.Errorf("iperf failed: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
+	}
+
+	// Append stderr to output so callers can see ERROR/WARNING lines
+	if stderrStr := stderr.String(); strings.TrimSpace(stderrStr) != "" {
+		buf.WriteString(stderrStr)
 	}
 
 	return buf.String(), nil

@@ -31,6 +31,7 @@ type RunnerConfig struct {
 	Reverse     bool
 	Bidir       bool
 	Bandwidth   string
+	IPv6        bool
 
 	// Remote server (optional)
 	SSHHost      string
@@ -50,6 +51,13 @@ type RunnerConfig struct {
 	OutputCSV string
 	Verbose   bool
 	Debug     bool
+
+	// SSH client — set after Connect(), used by Reverse/Bidir/Forward with SSH
+	SSHClient iperf.SSHClient
+	// IsWindows — set after Connect() if remote is Windows
+	IsWindows bool
+	// LocalAddr — local IP for reverse/bidir (remote client connects back here)
+	LocalAddr string
 }
 
 // LocalTestRunner runs a single iperf2 test locally and optionally saves results.
@@ -66,6 +74,9 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 		Reverse:    cfg.Reverse,
 		Bidir:      cfg.Bidir,
 		Bandwidth:  cfg.Bandwidth,
+		IPv6:       cfg.IPv6,
+		IsWindows:  cfg.IsWindows,
+		LocalAddr:  cfg.LocalAddr,
 		Enhanced:   true,
 	}
 
@@ -137,13 +148,18 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 	testStart := time.Now()
 
 	onInterval := func(fwd, rev *model.IntervalResult) {
-		if fwd != nil {
-			ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
-			if rev != nil {
-				fmt.Println(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
-			} else {
-				fmt.Println(ts + "  " + format.FormatInterval(fwd, isUDP))
-			}
+		if fwd == nil && rev == nil {
+			return
+		}
+		ref := fwd
+		if ref == nil {
+			ref = rev
+		}
+		ts := testStart.Add(time.Duration(ref.TimeStart * float64(time.Second))).Format("15:04:05")
+		if iperfCfg.Bidir {
+			fmt.Println(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
+		} else if fwd != nil {
+			fmt.Println(ts + "  " + format.FormatInterval(fwd, isUDP))
 		}
 	}
 
@@ -154,11 +170,15 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 	version, _ := iperf.CheckVersion(iperfCfg.BinaryPath)
 
 	if iperfCfg.Bidir {
-		result, err = runner.RunBidir(ctx, iperfCfg, nil, onInterval)
+		if cfg.SSHClient == nil {
+			result, err = runner.RunBidirDualtest(ctx, iperfCfg, onInterval)
+		} else {
+			result, err = runner.RunBidir(ctx, iperfCfg, cfg.SSHClient, onInterval)
+		}
 	} else if iperfCfg.Reverse {
-		result, err = runner.RunReverse(ctx, iperfCfg, nil, onInterval)
+		result, err = runner.RunReverse(ctx, iperfCfg, cfg.SSHClient, onInterval)
 	} else {
-		result, err = runner.RunForward(ctx, iperfCfg, nil, onInterval)
+		result, err = runner.RunForward(ctx, iperfCfg, cfg.SSHClient, onInterval)
 	}
 
 	// Stop background ping and collect result
@@ -360,6 +380,15 @@ func (r *RemoteServerRunner) CheckStatus() (bool, error) {
 // Client returns the underlying SSH client for use with the iperf2 runner.
 func (r *RemoteServerRunner) Client() *ssh.Client {
 	return r.client
+}
+
+// IsWindows returns true if the remote host is running Windows.
+func (r *RemoteServerRunner) IsWindows() bool {
+	if r.client == nil {
+		return false
+	}
+	os, err := r.client.DetectOS()
+	return err == nil && os == ssh.OSWindows
 }
 
 // PrintResult formats and prints a test result.

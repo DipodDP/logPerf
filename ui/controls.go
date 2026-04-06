@@ -144,6 +144,22 @@ func (c *Controls) onStart() {
 
 	cfg := c.configForm.Config()
 
+	// Wire SSH-derived fields into config before validation
+	if c.remotePanel.IsConnected() {
+		if cfg.LocalAddr == "" {
+			cfg.LocalAddr = c.remotePanel.LocalAddr()
+		}
+		cfg.IsWindows = c.remotePanel.IsWindows()
+		// Set default remote output file for SSH fallback
+		if cfg.RemoteOutputFile == "" {
+			if cfg.IsWindows {
+				cfg.RemoteOutputFile = `C:\iperf2_server_output.txt`
+			} else {
+				cfg.RemoteOutputFile = "/tmp/iperf2_server_output.txt"
+			}
+		}
+	}
+
 	if err := cfg.Validate(); err != nil {
 		c.outputView.AppendLine("Config error: " + err.Error())
 		c.resetState()
@@ -219,44 +235,79 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 
 	testStart := time.Now()
 	onInterval := func(fwd, rev *model.IntervalResult) {
-		if fwd == nil {
+		if fwd == nil && rev == nil {
 			return
 		}
-		ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
-		if cfg.Bidir && rev != nil {
+		ref := fwd
+		if ref == nil {
+			ref = rev
+		}
+		ts := testStart.Add(time.Duration(ref.TimeStart * float64(time.Second))).Format("15:04:05")
+		if cfg.Bidir {
 			c.outputView.AppendLine(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
-		} else {
+		} else if fwd != nil {
 			c.outputView.AppendLine(ts + "  " + format.FormatInterval(fwd, isUDP))
 		}
+	}
+
+	// Get SSH client from remote panel (may be nil if not connected)
+	sshCli := c.remotePanel.Client()
+
+	// Route runner status messages to the GUI output view
+	c.runner.SetStatusCallback(func(msg string) {
+		c.outputView.AppendLine(msg)
+	})
+
+	// Show progress for reverse/bidir (no real-time intervals during test)
+	if cfg.Reverse {
+		c.outputView.AppendLine("Test in progress (reverse direction — results will appear when complete)...")
+	} else if cfg.Bidir {
+		c.outputView.AppendLine("Test in progress (bidirectional — results will appear when complete)...")
 	}
 
 	// Dispatch based on direction
 	var result *model.TestResult
 	var err error
 	if cfg.Bidir {
-		result, err = c.runner.RunBidir(ctx, cfg, nil, onInterval)
+		if sshCli == nil {
+			result, err = c.runner.RunBidirDualtest(ctx, cfg, onInterval)
+		} else {
+			result, err = c.runner.RunBidir(ctx, cfg, sshCli, onInterval)
+		}
 	} else if cfg.Reverse {
-		result, err = c.runner.RunReverse(ctx, cfg, nil, onInterval)
+		result, err = c.runner.RunReverse(ctx, cfg, sshCli, onInterval)
 	} else {
-		result, err = c.runner.RunForward(ctx, cfg, nil, onInterval)
+		result, err = c.runner.RunForward(ctx, cfg, sshCli, onInterval)
 	}
 
 	// If the test failed to reach the server and we have an SSH connection,
 	// start (or restart) the remote iperf2 and retry once.
 	if err != nil && isServerUnreachable(err) {
 		if c.remotePanel.IsConnected() {
-			c.outputView.AppendLine("Server not responding, starting remote iperf2...")
-			if restartErr := c.remotePanel.RestartServer(); restartErr != nil {
+			// Calculate the number of server instances needed
+			numInstances := cfg.Parallel
+			if cfg.Bidir {
+				numInstances = cfg.Parallel * 2 // forward + reverse port ranges
+			}
+			if numInstances < 2 {
+				numInstances = 2
+			}
+			c.outputView.AppendLine(fmt.Sprintf("Server not responding, starting remote iperf2 (%d instances)...", numInstances))
+			if restartErr := c.remotePanel.RestartServer(numInstances); restartErr != nil {
 				c.outputView.AppendLine(fmt.Sprintf("Start failed: %v", restartErr))
 			} else {
 				c.outputView.AppendLine("Server started, retrying test...")
 				time.Sleep(time.Second)
 				if cfg.Bidir {
-					result, err = c.runner.RunBidir(ctx, cfg, nil, onInterval)
+					if sshCli == nil {
+						result, err = c.runner.RunBidirDualtest(ctx, cfg, onInterval)
+					} else {
+						result, err = c.runner.RunBidir(ctx, cfg, sshCli, onInterval)
+					}
 				} else if cfg.Reverse {
-					result, err = c.runner.RunReverse(ctx, cfg, nil, onInterval)
+					result, err = c.runner.RunReverse(ctx, cfg, sshCli, onInterval)
 				} else {
-					result, err = c.runner.RunForward(ctx, cfg, nil, onInterval)
+					result, err = c.runner.RunForward(ctx, cfg, sshCli, onInterval)
 				}
 			}
 		} else {
@@ -281,7 +332,7 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 			Timestamp:     time.Now(),
 			ServerAddr:    cfg.ServerAddr,
 			Port:          cfg.Port,
-			Protocol:      cfg.Protocol,
+			Protocol:      strings.ToUpper(cfg.Protocol),
 			Duration:      cfg.Duration,
 			Parallel:      cfg.Parallel,
 			BlockSize:     cfg.BlockSize,
@@ -297,6 +348,8 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 			errResult.Direction = "Bidirectional"
 		} else if cfg.Reverse {
 			errResult.Direction = "Reverse"
+		} else {
+			errResult.Direction = "Forward"
 		}
 		errResult.MeasurementID = export.NextMeasurementID(errResult.Timestamp)
 		c.autoSave(&errResult)

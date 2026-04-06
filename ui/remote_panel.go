@@ -10,6 +10,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
+	"iperf-tool/internal/iperf"
 	internalssh "iperf-tool/internal/ssh"
 )
 
@@ -236,9 +237,39 @@ func (rp *RemotePanel) IsConnected() bool {
 	return rp.client != nil
 }
 
+// Client returns the active SSH client, or nil if not connected.
+func (rp *RemotePanel) Client() iperf.SSHClient {
+	if rp.client == nil {
+		return nil
+	}
+	return rp.client
+}
+
 // Host returns the configured SSH host address.
 func (rp *RemotePanel) Host() string {
 	return rp.hostEntry.Text
+}
+
+// IsWindows returns true if the connected remote host was detected as Windows.
+// Returns false if not connected or OS detection fails.
+func (rp *RemotePanel) IsWindows() bool {
+	if rp.client == nil {
+		return false
+	}
+	osType, err := rp.client.DetectOS()
+	if err != nil {
+		return false
+	}
+	return osType == internalssh.OSWindows
+}
+
+// LocalAddr returns the local IP address of the SSH connection, or empty if
+// not connected.
+func (rp *RemotePanel) LocalAddr() string {
+	if rp.client == nil {
+		return ""
+	}
+	return rp.client.LocalAddr()
 }
 
 // getPort returns the configured iperf2 server port, or 5201 if invalid.

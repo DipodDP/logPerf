@@ -134,9 +134,9 @@ func WriteCSV(path string, results []model.TestResult) error {
 			strconv.Itoa(r.Retransmits),
 			strconv.Itoa(r.ReverseRetransmits),
 			fwdJitter(r),
-			strconv.Itoa(r.LostPackets),
-			fmt.Sprintf("%.2f", r.LostPercent),
-			strconv.Itoa(r.Packets),
+			strconv.Itoa(fwdLostPackets(r)),
+			fmt.Sprintf("%.2f", fwdLostPercent(r)),
+			strconv.Itoa(fwdPackets(r)),
 			fmt.Sprintf("%.3f", r.ReverseJitterMs),
 			strconv.Itoa(r.ReverseLostPackets),
 			fmt.Sprintf("%.2f", r.ReverseLostPercent),
@@ -182,6 +182,33 @@ func revMbpsCSV(r model.TestResult) string {
 		return fmt.Sprintf("%.2f", r.ReceivedMbps())
 	}
 	return fmt.Sprintf("%.2f", r.ReverseActualMbps())
+}
+
+// fwdLostPackets returns the forward lost packets count.
+// In bidir mode, uses FwdLostPackets (server-measured); otherwise LostPackets.
+func fwdLostPackets(r model.TestResult) int {
+	if r.Direction == "Bidirectional" && r.FwdLostPackets > 0 {
+		return r.FwdLostPackets
+	}
+	return r.LostPackets
+}
+
+// fwdLostPercent returns the forward lost percent.
+// In bidir mode, uses FwdLostPercent (server-measured); otherwise LostPercent.
+func fwdLostPercent(r model.TestResult) float64 {
+	if r.Direction == "Bidirectional" && r.FwdPackets > 0 {
+		return r.FwdLostPercent
+	}
+	return r.LostPercent
+}
+
+// fwdPackets returns the forward total packet count.
+// In bidir mode, uses FwdPackets (server-measured); otherwise Packets.
+func fwdPackets(r model.TestResult) int {
+	if r.Direction == "Bidirectional" && r.FwdPackets > 0 {
+		return r.FwdPackets
+	}
+	return r.Packets
 }
 
 // fwdJitter returns the fwd_jitter_ms CSV value.

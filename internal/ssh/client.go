@@ -166,6 +166,25 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// LocalAddr returns the local network address used for the SSH connection.
+// It returns an empty string if the connection is not active or if the
+// local address cannot be determined.
+func (c *Client) LocalAddr() string {
+	if c.conn == nil {
+		return ""
+	}
+	
+	addr := c.conn.LocalAddr()
+	if addr == nil {
+		return ""
+	}
+	
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
+}
 
 // sshAgentSigners returns signers from the running SSH agent, or nil.
 func sshAgentSigners() []ssh.Signer {
