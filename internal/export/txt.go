@@ -81,16 +81,11 @@ func writeBlock(w lineWriter, r *model.TestResult) {
 		writeln(w, fmt.Sprintf("Local IP:        %s", r.LocalIP))
 	}
 	if r.IperfVersion != "" {
-		writeln(w, fmt.Sprintf("iperf3 version:  %s", r.IperfVersion))
+		writeln(w, fmt.Sprintf("iperf version:   %s", r.IperfVersion))
 	}
 	if r.Mode != "" {
 		writeln(w, fmt.Sprintf("Mode:            %s", r.Mode))
 	}
-	jsonMode := "standard JSON"
-	if len(r.Intervals) > 0 {
-		jsonMode = "JSON-stream"
-	}
-	writeln(w, fmt.Sprintf("JSON mode:       %s", jsonMode))
 	if r.SSHRemoteHost != "" {
 		writeln(w, fmt.Sprintf("Remote host:     %s", r.SSHRemoteHost))
 	}

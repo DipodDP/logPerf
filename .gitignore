@@ -1,5 +1,6 @@
 # Binaries for programs and plugins
 iperf-tool
+iperf-cli
 *.exe
 *.dll
 *.so
@@ -7,6 +8,8 @@ iperf-tool
 
 # Test binaries
 *_test
+_parsetest/
+_probe/
 
 # Output of the go installer
 *.out

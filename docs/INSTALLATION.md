@@ -1,6 +1,6 @@
-# Automatic iperf3 Installation
+# Automatic iperf2 Installation
 
-The application now includes automatic iperf3 installation on remote servers when the user is connected via SSH with sudo/administrator privileges.
+The application includes automatic iperf2 installation on remote servers when the user is connected via SSH with sudo/administrator privileges.
 
 ## Features
 
@@ -8,36 +8,36 @@ The application now includes automatic iperf3 installation on remote servers whe
 The application automatically detects the remote operating system:
 - **Linux** (via `uname -s`)
 - **macOS** (via `uname -s`)
-- **Windows** (via `cmd.exe`)
+- **Windows** (via `cmd.exe /c echo %OS%`)
 
 ### Package Manager Detection
 
 #### Linux
 Supports the following package managers (auto-detected):
-- **apt-get** (Debian/Ubuntu) — `sudo apt-get install iperf3`
-- **yum** (RHEL/CentOS 7) — `sudo yum install iperf3`
-- **dnf** (Fedora/RHEL 8+) — `sudo dnf install iperf3`
-- **apk** (Alpine) — `sudo apk add iperf3`
-- **pacman** (Arch) — `sudo pacman -S iperf3`
+- **apt-get** (Debian/Ubuntu) — `sudo apt-get install -y iperf`
+- **yum** (RHEL/CentOS 7) — `sudo yum install -y iperf`
+- **dnf** (Fedora/RHEL 8+) — `sudo dnf install -y iperf`
+- **apk** (Alpine) — `sudo apk add iperf`
+- **pacman** (Arch) — `sudo pacman -S --noconfirm iperf`
 
 #### macOS
-- **Homebrew** — `brew install iperf3`
+- **Homebrew** — `brew install iperf`
   - Homebrew must be installed
 
 #### Windows
-- **Chocolatey** — `choco install iperf3`
-- **WinGet** (Windows 10+) — `winget install EricSilva.iPerf3`
-- If neither is available, the user is directed to [iperf.fr](https://iperf.fr/iperf-download.php) for manual installation
+- Downloads `iperf-2.2.1-win64.zip` from SourceForge
+- Extracts to `C:\iperf2`
+- Updates system PATH
 
 ## Requirements
 
 ### Privileges
 - **Linux/macOS**: User must have `sudo` privilege (passwordless sudo preferred)
-- **Windows**: User must be an Administrator (UAC elevation required)
+- **Windows**: User must be an Administrator
 
 ### Verification
-- The application checks if iperf3 is already installed before attempting installation
-- If iperf3 is installed, "Install iperf3" button shows as unavailable after connection
+- The application checks if iperf2 is already installed before attempting installation
+- If iperf2 is installed, the install step is skipped
 
 ## GUI Usage
 
@@ -45,38 +45,37 @@ Supports the following package managers (auto-detected):
    - Enter SSH host, username, and authentication (key or password)
    - Click "Connect"
 
-2. **Install iperf3** (if not already installed)
-   - Click "Install iperf3" button
+2. **Install iperf2** (if not already installed)
+   - Click "Install iperf" button
    - Status updates show installation progress
-   - For Windows, UAC may prompt for administrator approval
 
 3. **Start Server**
    - Set desired port (default 5201)
-   - Click "Start Server" to launch iperf3 in daemon mode
+   - Click "Start Server" to launch iperf2 server instances
+   - On Unix: daemon mode (`iperf -s -p <port> -D`)
+   - On Windows: WMI process creation (survives SSH disconnect)
 
 ## Error Handling
 
 If installation fails, the status label will show:
-- "requires sudo/administrator privileges to install iperf3" — user lacks elevated privileges
+- "iperf2 is not installed on the remote host" — binary not found in PATH
+- "requires sudo/administrator privileges" — user lacks elevated privileges
 - "no supported package manager found" — unsupported OS or missing all package managers
-- Other specific error messages with details
 
 ## Implementation Details
 
 ### SSH Module Functions
 
-- `Client.DetectOS()` — Determines remote operating system
-- `Client.CheckIperf3Installed()` — Checks if iperf3 is available in PATH
-- `Client.InstallIperf3()` — Detects OS and runs appropriate install command
-- `Client.hasSudoPrivilege()` — Verifies sudo/admin access via `sudo -n true`
+- `Client.DetectOS()` — Determines remote operating system (`OSLinux`, `OSMacOS`, `OSWindows`)
+- `Client.CheckIperfInstalled()` — Checks if iperf/iperf.exe is available in PATH
+- `Client.InstallIperf()` — Detects OS and runs appropriate install command
 - `Client.installLinux()`, `Client.installMacOS()`, `Client.installWindows()` — OS-specific install logic
 
-### UI Integration
+### Remote Server Management
 
-The "Install iperf3" button is:
-- **Enabled** after successful SSH connection
-- **Disabled** during installation (non-blocking, runs in goroutine)
-- **Status updates** reflected in the status label
+- **Unix/Linux**: Daemon mode (`iperf -s -p <port> -D`), verified with `netstat`
+- **Windows**: WMI process creation (`Invoke-WmiMethod Win32_Process`), firewall rules added via `netsh`
+- **Server stop**: `pkill`/`killall` on Unix, `taskkill /IM iperf.exe /F` on Windows
 
 ## Testing
 
@@ -93,21 +92,29 @@ go test ./internal/ssh -v
 ## Troubleshooting
 
 ### "requires sudo/administrator privileges"
-- **Linux/macOS**: Run `sudo visudo` and ensure your user is in the sudoers list, preferably with NOPASSWD for iperf3 commands
-- **Windows**: Ensure you have Administrator privileges; UAC may need to be confirmed
+- **Linux/macOS**: Ensure your user has `sudo` access, preferably with NOPASSWD
+- **Windows**: Ensure you have Administrator privileges
 
 ### "no supported package manager found"
 - **Linux**: One of (apt-get, yum, dnf, apk, pacman) must be installed
 - **macOS**: Homebrew must be installed (https://brew.sh)
-- **Windows**: Install Chocolatey (https://chocolatey.org) or use Windows 10+ WinGet
+- **Windows**: Auto-downloads from SourceForge; ensure internet access
 
 ### Connection timeout during installation
 - Installation may take 1-2 minutes on slow connections
 - Large package downloads are normal on first-time installation
 
-## Future Enhancements
+## Cross-Platform Support
 
-- [ ] Progress indication for long installations
-- [ ] Support for more Windows installation methods (Scoop, direct download)
-- [ ] Pre-check for package manager availability before attempting install
-- [ ] Fallback to building iperf3 from source if no package manager available
+The tool runs natively on macOS, Linux, and Windows:
+
+| Feature | macOS | Linux | Windows |
+|---------|-------|-------|---------|
+| GUI | Fyne (native) | Fyne (X11/Wayland) | Fyne (native) |
+| CLI | Full support | Full support | Full support |
+| Ping measurement | `ping -c` / continuous | `ping -c` / continuous | `ping -n` / `ping -t` |
+| Process management | SIGTERM | SIGTERM | Kill |
+| SSH username default | `$USER` | `$USER` | `%USERNAME%` |
+| Binary default | `iperf` | `iperf` | `iperf.exe` |
+| Debug log path | `$TMPDIR/iperf-debug.log` | `/tmp/iperf-debug.log` | `%TEMP%\iperf-debug.log` |
+| Remote server start | `nohup ... &` | `nohup ... &` | WMI (`Invoke-WmiMethod`) |

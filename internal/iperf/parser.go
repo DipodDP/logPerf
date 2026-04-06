@@ -1,8 +1,8 @@
 package iperf
 
 import (
-	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -11,711 +11,904 @@ import (
 	"iperf-tool/internal/model"
 )
 
-// iperfOutput represents the top-level iperf3 JSON output structure.
-type iperfOutput struct {
-	Start iperfStart `json:"start"`
-	End   iperfEnd   `json:"end"`
-	Error string     `json:"error"`
+// ServerReportStatus indicates the validity of a client-side Server Report.
+type ServerReportStatus int
+
+const (
+	// ServerReportValid means the summary is present with no WARNING — data is trustworthy.
+	ServerReportValid ServerReportStatus = iota
+	// ServerReportFabricated means WARNING present — client fabricated the Server Report.
+	ServerReportFabricated
+	// ServerReportMissing means no Server Report summary line was found.
+	ServerReportMissing
+	// ServerReportUnknown means no WARNING but likely interrupted (unreliable).
+	ServerReportUnknown
+)
+
+var (
+	// Standard server-side interval: jitter and lost/total columns
+	// [  1]  0.00-1.00 sec  0.343 MBytes  2.88 Mbits/sec  10.088 ms  266/511 (52%)
+	reServerInterval = regexp.MustCompile(
+		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+([\d.]+)\s+ms\s+(\d+)/\s*(\d+)\s+\(([\d.]+)%\)`)
+
+	// Enhanced server-side interval (-e mode): adds latency, PPS, etc.
+	// [  1]  0.00-1.00 sec  0.343 MBytes  2.88 Mbits/sec  10.088 ms  266/  511 (52%)  -0.719/ 0.231/ 1.181/ 0.950 ms  511 pps
+	reServerEnhanced = regexp.MustCompile(
+		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+([\d.]+)\s+ms\s+(\d+)/\s*(\d+)\s+\(([\d.]+)%\)\s+(-?[\d.]+)/\s*(-?[\d.]+)/\s*(-?[\d.]+)/\s*(-?[\d.]+)\s+ms\s+(\d+)\s+pps`)
+
+	// Client-side interval: no jitter/loss columns
+	// [  1]  0.00-1.00 sec  0.875 MBytes  7.34 Mbits/sec
+	reClientInterval = regexp.MustCompile(
+		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s*$`)
+
+	// Enhanced TCP server-side interval (-e mode): Reads=Dist histogram
+	// [  1]  0.00-1.00 sec  2.51 MBytes  21.0 Mbits/sec  585=576:3:0:0:0:0:1:5
+	reServerEnhancedTCP = regexp.MustCompile(
+		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+\d+=`)
+
+	// Enhanced client-side interval (-e mode): adds Write/Err/Timeo
+	// [  1]  0.00-1.00 sec  0.875 MBytes  7.34 Mbits/sec  625/0/0
+	reClientEnhanced = regexp.MustCompile(
+		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+(\d+)/(\d+)/(\d+)`)
+
+	// Enhanced TCP client with -V flag: Write/Err  Rtry  Cwnd/RTT  NetPwr
+	// [  1] 0.00-3.35 sec  28.5 MBytes  71.4 Mbits/sec  229/0          0       NA/98000(49)us    91.10
+	reClientTCPVerbose = regexp.MustCompile(
+		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+(\d+)/(\d+)\s+(\d+)`)
+
+	// SUM line (server-side, with loss):
+	// [SUM-2]  0.00-10.00 sec  9.77 MBytes  5.59 Mbits/sec  4942/11909 (41%)
+	reSumServer = regexp.MustCompile(
+		`^\[SUM-?\d*\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+([\d.]+)\s+ms\s+(\d+)/\s*(\d+)\s+\(([\d.]+)%\)`)
+
+	// SUM line (server-side, without jitter — for cases where jitter isn't in the SUM line):
+	// [SUM-2]  0.00-10.03 sec  9.77 MBytes  8.17 Mbits/sec   6.405 ms 4942/11909 (41%)
+	reSumServerNoJitter = regexp.MustCompile(
+		`^\[SUM-?\d*\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+(\d+)/\s*(\d+)\s+\(([\d.]+)%\)`)
+
+	// SUM line (client-side, no loss):
+	// [SUM]  0.00-10.00 sec  16.7 MBytes  14.0 Mbits/sec
+	reSumClient = regexp.MustCompile(
+		`^\[SUM(?:-\d+)?\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec`)
+
+	// Server Report marker — client received server-side stats via ACK
+	reServerReport = regexp.MustCompile(`(?i)server\s+report`)
+
+	// WARNING: ack of last datagram failed — server report is fabricated
+	reACKWarning = regexp.MustCompile(`WARNING.*ack.*last.*datagram`)
+)
+
+// parsedLine holds the parsed fields from a single iperf2 output line.
+type parsedLine struct {
+	streamID     int
+	timeStart    float64
+	timeEnd      float64
+	bytes        int64   // converted from MBytes
+	bandwidthBps float64 // Mbits/sec * 1e6
+	jitterMs     float64 // 0 if client-side
+	lostPackets  int
+	totalPackets int
+	lostPct      float64
+	isSum        bool
+	hasUDP       bool // true = server-side (jitter/loss present)
+	// Enhanced fields
+	latencyAvgMs float64
+	latencyMinMs float64
+	latencyMaxMs float64
+	latencyStdev float64
+	pps          int
+	writeCount   int // client-side -e
+	errCount     int
+	timeoCount   int
 }
 
-type iperfStart struct {
-	Connected []iperfConnected `json:"connected"`
-	TestStart iperfTestStart   `json:"test_start"`
-	Timestamp iperfTimestamp   `json:"timestamp"`
-}
-
-type iperfConnected struct {
-	RemoteHost string `json:"remote_host"`
-	RemotePort int    `json:"remote_port"`
-}
-
-type iperfTestStart struct {
-	Protocol   string `json:"protocol"`
-	NumStreams  int    `json:"num_streams"`
-	Duration   int    `json:"duration"`
-	// iperf3 doesn't include interval in test_start; we parse it from omit/reporting
-}
-
-type iperfTimestamp struct {
-	TimeSecs int64 `json:"timesecs"`
-}
-
-type iperfEnd struct {
-	Sum                     iperfSum         `json:"sum"`
-	SumSent                 iperfSum         `json:"sum_sent"`
-	SumReceived             iperfSum         `json:"sum_received"`
-	SumSentBidirReverse     iperfSum         `json:"sum_sent_bidir_reverse"`
-	SumReceivedBidirReverse iperfSum         `json:"sum_received_bidir_reverse"`
-	Streams                 []iperfStreamEnd `json:"streams"`
-	ServerOutputJson        *iperfOutput     `json:"server_output_json"` // present with --get-server-output
-}
-
-type iperfSum struct {
-	Bytes         int64   `json:"bytes"`
-	BitsPerSecond float64 `json:"bits_per_second"`
-	Retransmits   int     `json:"retransmits"`
-	JitterMs      float64 `json:"jitter_ms"`
-	LostPackets   int     `json:"lost_packets"`
-	Packets       int     `json:"packets"`
-	LostPercent   float64 `json:"lost_percent"`
-	Seconds       float64 `json:"seconds"`
-}
-
-type iperfStreamEnd struct {
-	Sender   iperfStreamSide  `json:"sender"`
-	Receiver iperfStreamSide  `json:"receiver"`
-	UDP      *iperfStreamUDP  `json:"udp"`
-}
-
-type iperfStreamUDP struct {
-	Socket        int     `json:"socket"`
-	BitsPerSecond float64 `json:"bits_per_second"`
-	JitterMs      float64 `json:"jitter_ms"`
-	LostPackets   int     `json:"lost_packets"`
-	Packets       int     `json:"packets"`
-	LostPercent   float64 `json:"lost_percent"`
-	Sender        bool    `json:"sender"` // true = forward (client→server), false = reverse
-}
-
-type iperfStreamSide struct {
-	Socket        int     `json:"socket"`
-	BitsPerSecond float64 `json:"bits_per_second"`
-	Retransmits   int     `json:"retransmits"`
-	Sender        bool    `json:"sender"`
-}
-
-// streamEvent represents a single line from iperf3 --json-stream output.
-type streamEvent struct {
-	Event string          `json:"event"`
-	Data  json.RawMessage `json:"data"`
-}
-
-// intervalData represents the data payload of a "interval" stream event.
-type intervalData struct {
-	Streams        []intervalStream `json:"streams"`
-	Sum            intervalSum      `json:"sum"`
-	SumBidirReverse *intervalSum   `json:"sum_bidir_reverse"` // present in bidir mode only
-}
-
-type intervalStream struct {
-	Socket        int     `json:"socket"`
-	Start         float64 `json:"start"`
-	End           float64 `json:"end"`
-	Seconds       float64 `json:"seconds"`
-	Bytes         int64   `json:"bytes"`
-	BitsPerSecond float64 `json:"bits_per_second"`
-	Retransmits   int     `json:"retransmits"`
-	Packets       int     `json:"packets"`
-	LostPackets   int     `json:"lost_packets"`
-	LostPercent   float64 `json:"lost_percent"`
-	JitterMs      float64 `json:"jitter_ms"`
-	Omitted       bool    `json:"omitted"`
-}
-
-type intervalSum struct {
-	Start         float64 `json:"start"`
-	End           float64 `json:"end"`
-	Seconds       float64 `json:"seconds"`
-	Bytes         int64   `json:"bytes"`
-	BitsPerSecond float64 `json:"bits_per_second"`
-	Retransmits   int     `json:"retransmits"`
-	Packets       int     `json:"packets"`
-	LostPackets   int     `json:"lost_packets"`
-	LostPercent   float64 `json:"lost_percent"`
-	JitterMs      float64 `json:"jitter_ms"`
-	Omitted       bool    `json:"omitted"`
-	Sender        bool    `json:"sender"` // true = forward, false = reverse (bidir mode)
-}
-
-// ParseStreamEvent parses a single line of --json-stream output.
-func ParseStreamEvent(line []byte) (*streamEvent, error) {
-	var ev streamEvent
-	if err := json.Unmarshal(line, &ev); err != nil {
-		return nil, fmt.Errorf("parse stream event: %w", err)
+// parseSingleLine attempts to parse a single iperf2 output line.
+// Returns nil, false if the line doesn't match any known format.
+func parseSingleLine(line string) (*parsedLine, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil, false
 	}
-	if ev.Event == "" {
-		return nil, fmt.Errorf("stream event missing 'event' field")
+
+	// 1. Try enhanced server-side (most specific)
+	if m := reServerEnhanced.FindStringSubmatch(line); m != nil {
+		return parseServerEnhancedMatch(m), true
 	}
-	return &ev, nil
+
+	// 2. Try standard server-side (jitter + loss)
+	if m := reServerInterval.FindStringSubmatch(line); m != nil {
+		return parseServerIntervalMatch(m), true
+	}
+
+	// 2b. Try enhanced TCP server-side (Reads=Dist histogram, no jitter)
+	if m := reServerEnhancedTCP.FindStringSubmatch(line); m != nil {
+		return parseServerEnhancedTCPMatch(m), true
+	}
+
+	// 3. Try enhanced client-side (Write/Err/Timeo)
+	if m := reClientEnhanced.FindStringSubmatch(line); m != nil {
+		return parseClientEnhancedMatch(m), true
+	}
+
+	// 3b. Try TCP verbose (-V) client-side (Write/Err  Rtry)
+	if m := reClientTCPVerbose.FindStringSubmatch(line); m != nil {
+		return parseClientTCPVerboseMatch(m), true
+	}
+
+	// 4. Try standard client-side (bandwidth only)
+	if m := reClientInterval.FindStringSubmatch(line); m != nil {
+		return parseClientIntervalMatch(m), true
+	}
+
+	return nil, false
 }
 
-// ParseIntervalData parses the data from an "interval" stream event.
-// Returns the forward interval and, in bidir mode, the reverse interval
-// (from sum_bidir_reverse). The reverse return value is nil in normal mode.
-func ParseIntervalData(data json.RawMessage) (fwd *model.IntervalResult, rev *model.IntervalResult, err error) {
-	var id intervalData
-	if err = json.Unmarshal(data, &id); err != nil {
-		return nil, nil, fmt.Errorf("parse interval data: %w", err)
+func parseServerEnhancedMatch(m []string) *parsedLine {
+	p := &parsedLine{hasUDP: true}
+	p.streamID, _ = strconv.Atoi(m[1])
+	p.timeStart, _ = strconv.ParseFloat(m[2], 64)
+	p.timeEnd, _ = strconv.ParseFloat(m[3], 64)
+	mb, _ := strconv.ParseFloat(m[4], 64)
+	p.bytes = int64(mb * 1_000_000)
+	bw, _ := strconv.ParseFloat(m[5], 64)
+	p.bandwidthBps = bw * 1_000_000
+	p.jitterMs, _ = strconv.ParseFloat(m[6], 64)
+	p.lostPackets, _ = strconv.Atoi(m[7])
+	p.totalPackets, _ = strconv.Atoi(m[8])
+	p.lostPct, _ = strconv.ParseFloat(m[9], 64)
+	p.latencyAvgMs, _ = strconv.ParseFloat(m[10], 64)
+	p.latencyMinMs, _ = strconv.ParseFloat(m[11], 64)
+	p.latencyMaxMs, _ = strconv.ParseFloat(m[12], 64)
+	p.latencyStdev, _ = strconv.ParseFloat(m[13], 64)
+	p.pps, _ = strconv.Atoi(m[14])
+	return p
+}
+
+func parseServerIntervalMatch(m []string) *parsedLine {
+	p := &parsedLine{hasUDP: true}
+	p.streamID, _ = strconv.Atoi(m[1])
+	p.timeStart, _ = strconv.ParseFloat(m[2], 64)
+	p.timeEnd, _ = strconv.ParseFloat(m[3], 64)
+	mb, _ := strconv.ParseFloat(m[4], 64)
+	p.bytes = int64(mb * 1_000_000)
+	bw, _ := strconv.ParseFloat(m[5], 64)
+	p.bandwidthBps = bw * 1_000_000
+	p.jitterMs, _ = strconv.ParseFloat(m[6], 64)
+	p.lostPackets, _ = strconv.Atoi(m[7])
+	p.totalPackets, _ = strconv.Atoi(m[8])
+	p.lostPct, _ = strconv.ParseFloat(m[9], 64)
+	return p
+}
+
+func parseServerEnhancedTCPMatch(m []string) *parsedLine {
+	p := &parsedLine{}
+	p.streamID, _ = strconv.Atoi(m[1])
+	p.timeStart, _ = strconv.ParseFloat(m[2], 64)
+	p.timeEnd, _ = strconv.ParseFloat(m[3], 64)
+	mb, _ := strconv.ParseFloat(m[4], 64)
+	p.bytes = int64(mb * 1_000_000)
+	bw, _ := strconv.ParseFloat(m[5], 64)
+	p.bandwidthBps = bw * 1_000_000
+	return p
+}
+
+func parseClientEnhancedMatch(m []string) *parsedLine {
+	p := &parsedLine{}
+	p.streamID, _ = strconv.Atoi(m[1])
+	p.timeStart, _ = strconv.ParseFloat(m[2], 64)
+	p.timeEnd, _ = strconv.ParseFloat(m[3], 64)
+	mb, _ := strconv.ParseFloat(m[4], 64)
+	p.bytes = int64(mb * 1_000_000)
+	bw, _ := strconv.ParseFloat(m[5], 64)
+	p.bandwidthBps = bw * 1_000_000
+	p.writeCount, _ = strconv.Atoi(m[6])
+	p.errCount, _ = strconv.Atoi(m[7])
+	p.timeoCount, _ = strconv.Atoi(m[8])
+	return p
+}
+
+func parseClientIntervalMatch(m []string) *parsedLine {
+	p := &parsedLine{}
+	p.streamID, _ = strconv.Atoi(m[1])
+	p.timeStart, _ = strconv.ParseFloat(m[2], 64)
+	p.timeEnd, _ = strconv.ParseFloat(m[3], 64)
+	mb, _ := strconv.ParseFloat(m[4], 64)
+	p.bytes = int64(mb * 1_000_000)
+	bw, _ := strconv.ParseFloat(m[5], 64)
+	p.bandwidthBps = bw * 1_000_000
+	return p
+}
+
+func parseClientTCPVerboseMatch(m []string) *parsedLine {
+	p := &parsedLine{}
+	p.streamID, _ = strconv.Atoi(m[1])
+	p.timeStart, _ = strconv.ParseFloat(m[2], 64)
+	p.timeEnd, _ = strconv.ParseFloat(m[3], 64)
+	mb, _ := strconv.ParseFloat(m[4], 64)
+	p.bytes = int64(mb * 1_000_000)
+	bw, _ := strconv.ParseFloat(m[5], 64)
+	p.bandwidthBps = bw * 1_000_000
+	p.writeCount, _ = strconv.Atoi(m[6])
+	p.errCount, _ = strconv.Atoi(m[7])
+	return p
+}
+
+// ParseOutput parses the full text output of an iperf2 test run into a TestResult.
+// isServerSide should be true when parsing server output (has jitter/loss data),
+// false when parsing client output.
+func ParseOutput(text string, isServerSide bool) (*model.TestResult, error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("empty iperf2 output")
 	}
-	fwd = sumToInterval(id.Sum)
-	if id.SumBidirReverse != nil {
-		rev = sumToInterval(*id.SumBidirReverse)
+
+	lines := strings.Split(text, "\n")
+
+	// Detect Server Report section and ACK warning in client output
+	serverReportIdx := -1
+	ackWarning := false
+	for i, line := range lines {
+		if reServerReport.MatchString(line) && serverReportIdx == -1 {
+			serverReportIdx = i
+		}
+		if reACKWarning.MatchString(line) {
+			ackWarning = true
+		}
 	}
-	// For UDP, sum.jitter_ms is 0 in --json-stream mode because the client is
-	// the sender and jitter is measured by the receiver. Aggregate from
-	// per-stream entries instead (non-bidir streams all have Sender=true on
-	// the client side, so we take any stream with jitter_ms > 0).
-	if fwd.JitterMs == 0 {
-		var total float64
-		n := 0
-		for _, s := range id.Streams {
-			if s.JitterMs > 0 {
-				total += s.JitterMs
-				n++
+
+	// Parse all interval lines (excluding the Server Report section if fabricated)
+	type bucket struct {
+		lines []*parsedLine
+	}
+	intervals := map[float64]*bucket{}
+	var allParsed []*parsedLine
+	var sumLine *parsedLine
+
+	// Determine which lines to parse as "primary" data
+	// If we're parsing client output with a valid Server Report, split into
+	// two zones: pre-report (client intervals) and post-report (server data).
+	inServerReport := false
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Track when we enter the server report section
+		if !isServerSide && serverReportIdx >= 0 && i >= serverReportIdx {
+			if reServerReport.MatchString(trimmed) {
+				inServerReport = true
+				continue
 			}
 		}
-		if n > 0 {
-			fwd.JitterMs = total / float64(n)
+
+		// Skip Server Report data if it's fabricated
+		if inServerReport && ackWarning {
+			continue
 		}
-	}
-	return fwd, rev, nil
-}
 
-func sumToInterval(s intervalSum) *model.IntervalResult {
-	return &model.IntervalResult{
-		TimeStart:    s.Start,
-		TimeEnd:      s.End,
-		Bytes:        s.Bytes,
-		BandwidthBps: s.BitsPerSecond,
-		Retransmits:  s.Retransmits,
-		Packets:      s.Packets,
-		LostPackets:  s.LostPackets,
-		LostPercent:  s.LostPercent,
-		JitterMs:     s.JitterMs,
-		Omitted:      s.Omitted,
-	}
-}
+		// Try SUM lines first
+		if strings.HasPrefix(trimmed, "[SUM") {
+			if sl := parseSumLine(trimmed); sl != nil {
+				sumLine = sl
+				continue
+			}
+		}
 
-// ParseEndData parses the data from an "end" stream event into a TestResult.
-func ParseEndData(data json.RawMessage) (*model.TestResult, error) {
-	var end iperfEnd
-	if err := json.Unmarshal(data, &end); err != nil {
-		return nil, fmt.Errorf("parse end data: %w", err)
+		p, ok := parseSingleLine(trimmed)
+		if !ok {
+			continue
+		}
+
+		// If we're in the server report section and it's valid, mark as server data
+		if inServerReport && !ackWarning {
+			p.hasUDP = true // server report lines have jitter/loss
+		}
+
+		allParsed = append(allParsed, p)
+
+		// Group by time start for interval aggregation
+		key := roundTime(p.timeStart)
+		b, exists := intervals[key]
+		if !exists {
+			b = &bucket{}
+			intervals[key] = b
+		}
+		b.lines = append(b.lines, p)
 	}
-	// Use the larger of sent/received seconds as actual duration (one will be 0 in reverse mode).
-	actualDur := end.SumSent.Seconds
-	if end.SumReceived.Seconds > actualDur {
-		actualDur = end.SumReceived.Seconds
+
+	if len(allParsed) == 0 && sumLine == nil {
+		return nil, fmt.Errorf("no parseable iperf2 data found in output")
 	}
-	// UDP quality metrics (jitter, loss) are in sum_sent for normal mode.
-	// In reverse mode the client is the receiver so loss lives in sum_received.
-	// Use whichever has a non-zero packet count.
-	lostSrc := end.SumSent
-	if lostSrc.Packets == 0 && end.SumReceived.Packets > 0 {
-		lostSrc = end.SumReceived
-	}
+
 	result := &model.TestResult{
-		Timestamp:            time.Now(),
-		ActualDuration:       actualDur,
-		SentBps:              end.SumSent.BitsPerSecond,
-		ReceivedBps:          end.SumReceived.BitsPerSecond,
-		Retransmits:          end.SumSent.Retransmits,
-		JitterMs:             end.SumReceived.JitterMs,
-		LostPackets:          lostSrc.LostPackets,
-		LostPercent:          lostSrc.LostPercent,
-		Packets:              lostSrc.Packets,
-		BytesSent:            end.SumSent.Bytes,
-		BytesReceived:        end.SumReceived.Bytes,
-		ReverseSentBps:       end.SumSentBidirReverse.BitsPerSecond,
-		ReverseReceivedBps:   end.SumReceivedBidirReverse.BitsPerSecond,
-		ReverseRetransmits:   end.SumSentBidirReverse.Retransmits,
-		ReverseBytesSent:     end.SumSentBidirReverse.Bytes,
-		ReverseBytesReceived: end.SumReceivedBidirReverse.Bytes,
-		ReverseLostPackets:   end.SumReceivedBidirReverse.LostPackets,
-		ReverseLostPercent:   end.SumReceivedBidirReverse.LostPercent,
-		ReversePackets:       end.SumReceivedBidirReverse.Packets,
-		ReverseJitterMs:      end.SumReceivedBidirReverse.JitterMs,
+		Timestamp: time.Now(),
 	}
-	for i, s := range end.Streams {
-		if s.UDP != nil {
-			bps := s.UDP.BitsPerSecond
-			// In UDP bidir, RX streams (sender=false) report received bandwidth
-			// via the TCP-style Receiver field; UDP.BitsPerSecond is 0 for them.
-			if !s.UDP.Sender && bps == 0 {
-				bps = s.Receiver.BitsPerSecond
-			}
-			result.Streams = append(result.Streams, model.StreamResult{
-				ID:          i + 1,
-				Socket:      s.UDP.Socket,
-				SentBps:     bps,
-				JitterMs:    s.UDP.JitterMs,
-				LostPackets: s.UDP.LostPackets,
-				LostPercent: udpLostPct(s.UDP.LostPackets, s.UDP.Packets, s.UDP.LostPercent),
-				Packets:     s.UDP.Packets,
-				Sender:      s.UDP.Sender,
-			})
-		} else {
-			result.Streams = append(result.Streams, model.StreamResult{
-				ID:          i + 1,
-				Socket:      s.Sender.Socket,
-				SentBps:     s.Sender.BitsPerSecond,
-				ReceivedBps: s.Receiver.BitsPerSecond,
-				Retransmits: s.Sender.Retransmits,
-				Sender:      s.Sender.Sender,
-			})
+
+	// Build interval results by aggregating per-stream data at each time bucket
+	var sortedKeys []float64
+	for k := range intervals {
+		sortedKeys = insertSorted(sortedKeys, k)
+	}
+
+	for _, key := range sortedKeys {
+		b := intervals[key]
+		iv := aggregateInterval(b.lines, isServerSide || inServerReport)
+		if iv != nil {
+			result.Intervals = append(result.Intervals, *iv)
 		}
 	}
-	fillReverseSummaryFromStreams(result)
-	fillUDPBidirFwdJitter(result, end)
-	fillUDPFwdLostFromServer(result, end)
+
+	// Build summary from SUM line or from aggregating all per-stream final intervals
+	if sumLine != nil {
+		applySumToResult(result, sumLine, isServerSide)
+	} else if len(allParsed) > 0 {
+		buildSummaryFromParsed(result, allParsed, isServerSide)
+	}
+
+	// Set actual duration from the last interval
+	if len(result.Intervals) > 0 {
+		result.ActualDuration = result.Intervals[len(result.Intervals)-1].TimeEnd
+	}
+
 	return result, nil
 }
 
-// ParseStartData extracts connection and test metadata from a "start" stream event.
-func ParseStartData(data json.RawMessage, result *model.TestResult) error {
-	var start iperfStart
-	if err := json.Unmarshal(data, &start); err != nil {
-		return fmt.Errorf("parse start data: %w", err)
+// parseSumLine parses a [SUM] or [SUM-N] line.
+func parseSumLine(line string) *parsedLine {
+	// Try server SUM with jitter
+	if m := reSumServer.FindStringSubmatch(line); m != nil {
+		p := &parsedLine{isSum: true, hasUDP: true}
+		p.timeStart, _ = strconv.ParseFloat(m[1], 64)
+		p.timeEnd, _ = strconv.ParseFloat(m[2], 64)
+		mb, _ := strconv.ParseFloat(m[3], 64)
+		p.bytes = int64(mb * 1_000_000)
+		bw, _ := strconv.ParseFloat(m[4], 64)
+		p.bandwidthBps = bw * 1_000_000
+		p.jitterMs, _ = strconv.ParseFloat(m[5], 64)
+		p.lostPackets, _ = strconv.Atoi(m[6])
+		p.totalPackets, _ = strconv.Atoi(m[7])
+		p.lostPct, _ = strconv.ParseFloat(m[8], 64)
+		return p
 	}
-	if len(start.Connected) > 0 {
-		result.ServerAddr = start.Connected[0].RemoteHost
-		result.Port = start.Connected[0].RemotePort
+
+	// Try server SUM without jitter in the regex (jitter might be embedded differently)
+	if m := reSumServerNoJitter.FindStringSubmatch(line); m != nil {
+		p := &parsedLine{isSum: true, hasUDP: true}
+		p.timeStart, _ = strconv.ParseFloat(m[1], 64)
+		p.timeEnd, _ = strconv.ParseFloat(m[2], 64)
+		mb, _ := strconv.ParseFloat(m[3], 64)
+		p.bytes = int64(mb * 1_000_000)
+		bw, _ := strconv.ParseFloat(m[4], 64)
+		p.bandwidthBps = bw * 1_000_000
+		p.lostPackets, _ = strconv.Atoi(m[5])
+		p.totalPackets, _ = strconv.Atoi(m[6])
+		p.lostPct, _ = strconv.ParseFloat(m[7], 64)
+		return p
 	}
-	result.Protocol = strings.ToUpper(start.TestStart.Protocol)
-	result.Parallel = start.TestStart.NumStreams
-	result.Duration = start.TestStart.Duration
-	if start.Timestamp.TimeSecs > 0 {
-		result.Timestamp = time.Unix(start.Timestamp.TimeSecs, 0)
+
+	// Try client SUM (no loss)
+	if m := reSumClient.FindStringSubmatch(line); m != nil {
+		p := &parsedLine{isSum: true}
+		p.timeStart, _ = strconv.ParseFloat(m[1], 64)
+		p.timeEnd, _ = strconv.ParseFloat(m[2], 64)
+		mb, _ := strconv.ParseFloat(m[3], 64)
+		p.bytes = int64(mb * 1_000_000)
+		bw, _ := strconv.ParseFloat(m[4], 64)
+		p.bandwidthBps = bw * 1_000_000
+		return p
 	}
+
 	return nil
 }
 
-// ParseResult parses raw iperf3 JSON output into a TestResult.
-func ParseResult(jsonData []byte) (*model.TestResult, error) {
-	var out iperfOutput
-	if err := json.Unmarshal(jsonData, &out); err != nil {
-		return nil, fmt.Errorf("parse iperf3 JSON: %w", err)
+// aggregateInterval combines per-stream data at a time bucket into a single IntervalResult.
+func aggregateInterval(lines []*parsedLine, isServer bool) *model.IntervalResult {
+	if len(lines) == 0 {
+		return nil
 	}
 
-	actualDur := out.End.SumSent.Seconds
-	if out.End.SumReceived.Seconds > actualDur {
-		actualDur = out.End.SumReceived.Seconds
-	}
-	lostSrc := out.End.SumSent
-	if lostSrc.Packets == 0 && out.End.SumReceived.Packets > 0 {
-		lostSrc = out.End.SumReceived
-	}
-	result := &model.TestResult{
-		Timestamp:            time.Now(),
-		ActualDuration:       actualDur,
-		SentBps:              out.End.SumSent.BitsPerSecond,
-		ReceivedBps:          out.End.SumReceived.BitsPerSecond,
-		Retransmits:          out.End.SumSent.Retransmits,
-		JitterMs:             out.End.SumReceived.JitterMs,
-		LostPackets:          lostSrc.LostPackets,
-		LostPercent:          lostSrc.LostPercent,
-		Packets:              lostSrc.Packets,
-		BytesSent:            out.End.SumSent.Bytes,
-		BytesReceived:        out.End.SumReceived.Bytes,
-		ReverseSentBps:       out.End.SumSentBidirReverse.BitsPerSecond,
-		ReverseReceivedBps:   out.End.SumReceivedBidirReverse.BitsPerSecond,
-		ReverseRetransmits:   out.End.SumSentBidirReverse.Retransmits,
-		ReverseBytesSent:     out.End.SumSentBidirReverse.Bytes,
-		ReverseBytesReceived: out.End.SumReceivedBidirReverse.Bytes,
-		ReverseLostPackets:   out.End.SumReceivedBidirReverse.LostPackets,
-		ReverseLostPercent:   out.End.SumReceivedBidirReverse.LostPercent,
-		ReversePackets:       out.End.SumReceivedBidirReverse.Packets,
-		ReverseJitterMs:      out.End.SumReceivedBidirReverse.JitterMs,
-		Protocol:             strings.ToUpper(out.Start.TestStart.Protocol),
-		Parallel:             out.Start.TestStart.NumStreams,
-		Duration:             out.Start.TestStart.Duration,
+	iv := &model.IntervalResult{
+		TimeStart: lines[0].timeStart,
+		TimeEnd:   lines[0].timeEnd,
 	}
 
-	if out.Start.Timestamp.TimeSecs > 0 {
-		result.Timestamp = time.Unix(out.Start.Timestamp.TimeSecs, 0)
-	}
+	var totalBw float64
+	var totalBytes int64
+	var totalLost, totalPkts int
+	var jitterSum float64
+	jitterCount := 0
 
-	if len(out.Start.Connected) > 0 {
-		result.ServerAddr = out.Start.Connected[0].RemoteHost
-		result.Port = out.Start.Connected[0].RemotePort
-	}
-
-	for i, s := range out.End.Streams {
-		if s.UDP != nil {
-			bps := s.UDP.BitsPerSecond
-			if !s.UDP.Sender && bps == 0 {
-				bps = s.Receiver.BitsPerSecond
+	for _, p := range lines {
+		totalBw += p.bandwidthBps
+		totalBytes += p.bytes
+		if p.hasUDP {
+			totalLost += p.lostPackets
+			totalPkts += p.totalPackets
+			if p.jitterMs > 0 {
+				jitterSum += p.jitterMs
+				jitterCount++
 			}
-			result.Streams = append(result.Streams, model.StreamResult{
-				ID:          i + 1,
-				Socket:      s.UDP.Socket,
-				SentBps:     bps,
-				JitterMs:    s.UDP.JitterMs,
-				LostPackets: s.UDP.LostPackets,
-				LostPercent: udpLostPct(s.UDP.LostPackets, s.UDP.Packets, s.UDP.LostPercent),
-				Packets:     s.UDP.Packets,
-				Sender:      s.UDP.Sender,
-			})
-		} else {
-			result.Streams = append(result.Streams, model.StreamResult{
-				ID:          i + 1,
-				Socket:      s.Sender.Socket,
-				SentBps:     s.Sender.BitsPerSecond,
-				ReceivedBps: s.Receiver.BitsPerSecond,
-				Retransmits: s.Sender.Retransmits,
-				Sender:      s.Sender.Sender,
-			})
 		}
 	}
 
-	if out.Error != "" {
-		result.Error = out.Error
+	iv.BandwidthBps = totalBw
+	iv.Bytes = totalBytes
+	iv.LostPackets = totalLost
+	iv.Packets = totalPkts
+	if totalPkts > 0 {
+		iv.LostPercent = float64(totalLost) / float64(totalPkts) * 100
+	}
+	if jitterCount > 0 {
+		iv.JitterMs = jitterSum / float64(jitterCount)
 	}
 
-	fillReverseSummaryFromStreams(result)
-	fillUDPBidirFwdJitter(result, out.End)
-	fillUDPFwdLostFromServer(result, out.End)
+	return iv
+}
+
+// applySumToResult populates the TestResult summary fields from a SUM line.
+func applySumToResult(result *model.TestResult, sum *parsedLine, isServerSide bool) {
+	result.ActualDuration = sum.timeEnd
+
+	if isServerSide {
+		result.ReceivedBps = sum.bandwidthBps
+		result.FwdReceivedBps = sum.bandwidthBps
+		result.BytesReceived = sum.bytes
+		if sum.hasUDP {
+			result.JitterMs = sum.jitterMs
+			result.FwdJitterMs = sum.jitterMs
+			result.LostPackets = sum.lostPackets
+			result.FwdLostPackets = sum.lostPackets
+			result.Packets = sum.totalPackets
+			result.FwdPackets = sum.totalPackets
+			result.LostPercent = sum.lostPct
+			result.FwdLostPercent = sum.lostPct
+		}
+	} else {
+		result.SentBps = sum.bandwidthBps
+		result.BytesSent = sum.bytes
+		if sum.hasUDP {
+			result.JitterMs = sum.jitterMs
+			result.LostPackets = sum.lostPackets
+			result.Packets = sum.totalPackets
+			result.LostPercent = sum.lostPct
+		}
+	}
+}
+
+// buildSummaryFromParsed builds summary from per-stream final intervals
+// (when no SUM line is present — e.g. single stream).
+func buildSummaryFromParsed(result *model.TestResult, parsed []*parsedLine, isServerSide bool) {
+	// Find the final interval for each stream (longest timeEnd)
+	finalByStream := map[int]*parsedLine{}
+	for _, p := range parsed {
+		existing, ok := finalByStream[p.streamID]
+		if !ok || p.timeEnd > existing.timeEnd {
+			// Check if this looks like a summary line (covers the full test duration)
+			isSummary := p.timeStart == 0 && p.timeEnd > 1
+			if existingIsSummary := existing != nil && existing.timeStart == 0 && existing.timeEnd > 1; existingIsSummary {
+				// Both are summaries, use the one with longer duration
+				if p.timeEnd > existing.timeEnd {
+					finalByStream[p.streamID] = p
+				}
+			} else if isSummary {
+				finalByStream[p.streamID] = p
+			} else if !ok {
+				finalByStream[p.streamID] = p
+			}
+		}
+	}
+
+	var totalBw float64
+	var totalBytes int64
+	var totalLost, totalPkts int
+	var jitterSum float64
+	jitterCount := 0
+
+	for _, p := range finalByStream {
+		totalBw += p.bandwidthBps
+		totalBytes += p.bytes
+		if p.hasUDP {
+			totalLost += p.lostPackets
+			totalPkts += p.totalPackets
+			if p.jitterMs > 0 {
+				jitterSum += p.jitterMs
+				jitterCount++
+			}
+		}
+	}
+
+	if isServerSide {
+		result.ReceivedBps = totalBw
+		result.FwdReceivedBps = totalBw
+		result.BytesReceived = totalBytes
+		if totalPkts > 0 {
+			result.JitterMs = jitterSum / float64(max(jitterCount, 1))
+			result.FwdJitterMs = result.JitterMs
+			result.LostPackets = totalLost
+			result.FwdLostPackets = totalLost
+			result.Packets = totalPkts
+			result.FwdPackets = totalPkts
+			result.LostPercent = float64(totalLost) / float64(totalPkts) * 100
+			result.FwdLostPercent = result.LostPercent
+		}
+	} else {
+		result.SentBps = totalBw
+		result.BytesSent = totalBytes
+		if totalPkts > 0 {
+			result.JitterMs = jitterSum / float64(max(jitterCount, 1))
+			result.LostPackets = totalLost
+			result.Packets = totalPkts
+			result.LostPercent = float64(totalLost) / float64(totalPkts) * 100
+		}
+	}
+}
+
+// ParseIntervalLine parses a single iperf2 output line into an IntervalResult
+// for real-time display during piped output. Returns nil, nil if the line
+// doesn't match any known interval format.
+func ParseIntervalLine(line string) (*model.IntervalResult, error) {
+	p, ok := parseSingleLine(line)
+	if !ok {
+		return nil, nil
+	}
+
+	return &model.IntervalResult{
+		TimeStart:    p.timeStart,
+		TimeEnd:      p.timeEnd,
+		Bytes:        p.bytes,
+		BandwidthBps: p.bandwidthBps,
+		LostPackets:  p.lostPackets,
+		Packets:      p.totalPackets,
+		LostPercent:  p.lostPct,
+		JitterMs:     p.jitterMs,
+		StreamID:     p.streamID,
+	}, nil
+}
+
+// ValidateServerReport checks the client output text for Server Report validity.
+func ValidateServerReport(text string) ServerReportStatus {
+	hasReport := false
+	hasWarning := false
+
+	for _, line := range strings.Split(text, "\n") {
+		if reServerReport.MatchString(line) {
+			hasReport = true
+		}
+		if reACKWarning.MatchString(line) {
+			hasWarning = true
+		}
+	}
+
+	if !hasReport {
+		return ServerReportMissing
+	}
+	if hasWarning {
+		return ServerReportFabricated
+	}
+	// Check for fabricated data: 0.000 ms jitter in a Server Report data line is
+	// a strong indicator even without an explicit WARNING (e.g. Tailscale, SIGTERM).
+	// After a "Server Report:" header, check data lines for jitter == 0.000 ms.
+	lines := strings.Split(text, "\n")
+	inReport := false
+	allZeroJitter := true
+	reportDataLines := 0
+	for _, line := range lines {
+		if reServerReport.MatchString(line) {
+			inReport = true
+			continue
+		}
+		if inReport {
+			m := reServerInterval.FindStringSubmatch(line)
+			if m == nil {
+				m = reServerEnhanced.FindStringSubmatch(line)
+			}
+			if m != nil {
+				reportDataLines++
+				jitter, _ := strconv.ParseFloat(m[6], 64)
+				if jitter != 0.0 {
+					allZeroJitter = false
+				}
+			}
+		}
+	}
+	if reportDataLines > 0 && allZeroJitter {
+		return ServerReportFabricated
+	}
+	return ServerReportValid
+}
+
+// MergeBidirResults merges four partial results into a single bidirectional result.
+// fwdClient: client-side forward data (send stats)
+// fwdServer: server-side forward data (receive stats — jitter, loss)
+// revClient: remote client reverse data (send stats)
+// revServer: local server reverse data (receive stats — jitter, loss)
+func MergeBidirResults(fwdClient, fwdServer, revClient, revServer *model.TestResult) *model.TestResult {
+	result := *fwdClient
+	result.Direction = "Bidirectional"
+	result.Timestamp = time.Now()
+
+	// Forward server-measured data (receiving side)
+	if fwdServer != nil {
+		result.FwdReceivedBps = fwdServer.FwdReceivedBps
+		if result.FwdReceivedBps == 0 {
+			result.FwdReceivedBps = fwdServer.ReceivedBps
+		}
+		result.BytesReceived = fwdServer.BytesReceived
+		result.FwdLostPackets = fwdServer.FwdLostPackets
+		if result.FwdLostPackets == 0 {
+			result.FwdLostPackets = fwdServer.LostPackets
+		}
+		result.FwdPackets = fwdServer.FwdPackets
+		if result.FwdPackets == 0 {
+			result.FwdPackets = fwdServer.Packets
+		}
+		result.FwdJitterMs = fwdServer.FwdJitterMs
+		if result.FwdJitterMs == 0 {
+			result.FwdJitterMs = fwdServer.JitterMs
+		}
+		result.FwdLostPercent = fwdServer.FwdLostPercent
+		if result.FwdLostPercent == 0 {
+			result.FwdLostPercent = fwdServer.LostPercent
+		}
+	}
+
+	// Reverse client data (sending side)
+	if revClient != nil {
+		result.ReverseSentBps = revClient.SentBps
+		result.ReverseBytesSent = revClient.BytesSent
+	}
+
+	// Reverse server-measured data (receiving side)
+	if revServer != nil {
+		result.ReverseReceivedBps = revServer.FwdReceivedBps
+		if result.ReverseReceivedBps == 0 {
+			result.ReverseReceivedBps = revServer.ReceivedBps
+		}
+		result.ReverseBytesReceived = revServer.BytesReceived
+		result.ReverseJitterMs = revServer.FwdJitterMs
+		if result.ReverseJitterMs == 0 {
+			result.ReverseJitterMs = revServer.JitterMs
+		}
+		result.ReverseLostPackets = revServer.FwdLostPackets
+		if result.ReverseLostPackets == 0 {
+			result.ReverseLostPackets = revServer.LostPackets
+		}
+		result.ReversePackets = revServer.FwdPackets
+		if result.ReversePackets == 0 {
+			result.ReversePackets = revServer.Packets
+		}
+		result.ReverseLostPercent = revServer.FwdLostPercent
+		if result.ReverseLostPercent == 0 {
+			result.ReverseLostPercent = revServer.LostPercent
+		}
+		result.ReverseIntervals = revServer.Intervals
+	}
+
+	return &result
+}
+
+// MergeUnidirResults merges client and server results for a unidirectional test.
+// client: send-side data, server: receive-side data (jitter, loss).
+func MergeUnidirResults(client, server *model.TestResult) *model.TestResult {
+	result := *client
+
+	if server != nil {
+		result.FwdReceivedBps = server.FwdReceivedBps
+		if result.FwdReceivedBps == 0 {
+			result.FwdReceivedBps = server.ReceivedBps
+		}
+		if result.FwdReceivedBps == 0 {
+			result.FwdReceivedBps = server.SentBps // server-side "sent" = received data
+		}
+		result.ReceivedBps = result.FwdReceivedBps
+		result.FwdLostPackets = server.FwdLostPackets
+		if result.FwdLostPackets == 0 {
+			result.FwdLostPackets = server.LostPackets
+		}
+		result.FwdPackets = server.FwdPackets
+		if result.FwdPackets == 0 {
+			result.FwdPackets = server.Packets
+		}
+		result.FwdJitterMs = server.FwdJitterMs
+		if result.FwdJitterMs == 0 {
+			result.FwdJitterMs = server.JitterMs
+		}
+		result.FwdLostPercent = server.FwdLostPercent
+		if result.FwdLostPercent == 0 {
+			result.FwdLostPercent = server.LostPercent
+		}
+		// Set BytesReceived from server-side data for CSV/display
+		if result.BytesReceived == 0 {
+			result.BytesReceived = server.BytesReceived
+			if result.BytesReceived == 0 {
+				result.BytesReceived = server.BytesSent
+			}
+		}
+		// Set jitter/loss on legacy fields for non-bidir display
+		if result.JitterMs == 0 {
+			result.JitterMs = result.FwdJitterMs
+		}
+		if result.LostPackets == 0 && result.FwdLostPackets > 0 {
+			result.LostPackets = result.FwdLostPackets
+			result.LostPercent = result.FwdLostPercent
+			result.Packets = result.FwdPackets
+		}
+	}
+
+	return &result
+}
+
+// ParseDualtestOutput parses the output of iperf2 -d (dualtest) mode.
+// In dualtest mode, iperf2 runs both directions simultaneously. The output
+// interleaves two stream IDs: one for the forward (client→server) direction
+// and one for the reverse (server→client) direction.
+//
+// The forward stream is the client (sender) — lines have no jitter/loss.
+// The reverse stream is the local server (receiver) — lines may have jitter/loss for UDP.
+// Stream IDs are used to separate the two directions.
+func ParseDualtestOutput(text string) (*model.TestResult, error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("empty dualtest output")
+	}
+
+	lines := strings.Split(text, "\n")
+
+	// First pass: collect all parsed lines and discover stream IDs
+	type lineInfo struct {
+		parsed *parsedLine
+		raw    string
+	}
+	var allLines []lineInfo
+	streamIDs := map[int]bool{}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[SUM") {
+			continue // skip SUM lines, we'll build our own summaries
+		}
+		p, ok := parseSingleLine(trimmed)
+		if !ok {
+			continue
+		}
+		allLines = append(allLines, lineInfo{parsed: p, raw: trimmed})
+		streamIDs[p.streamID] = true
+	}
+
+	if len(allLines) == 0 {
+		return nil, fmt.Errorf("no parseable data in dualtest output")
+	}
+
+	// In dualtest mode, there are typically 2 stream IDs.
+	// The forward direction (client sending) has client-side lines (no UDP fields).
+	// The reverse direction (receiving) has server-side lines (with UDP fields for UDP tests).
+	// For TCP, both sides look similar — we separate by stream ID order:
+	// the first stream ID seen is the forward (client-initiated) direction.
+
+	// Determine which stream IDs are forward vs reverse.
+	// Forward (outgoing): the client stream — first ID encountered, typically lower.
+	// Reverse (incoming): the server-initiated stream — second ID, typically higher.
+	var fwdID, revID int
+	fwdSet := false
+	for _, li := range allLines {
+		if !fwdSet {
+			fwdID = li.parsed.streamID
+			fwdSet = true
+		} else if li.parsed.streamID != fwdID {
+			revID = li.parsed.streamID
+			break
+		}
+	}
+
+	// If only one stream ID found, treat all as forward
+	if revID == 0 && fwdSet {
+		revID = -1 // sentinel — no reverse data
+	}
+
+	// Separate lines by direction
+	var fwdLines, revLines []*parsedLine
+	for _, li := range allLines {
+		if li.parsed.streamID == fwdID {
+			fwdLines = append(fwdLines, li.parsed)
+		} else {
+			revLines = append(revLines, li.parsed)
+		}
+	}
+
+	// Build interval results for each direction
+	fwdIntervals := buildIntervals(fwdLines, false)
+	revIntervals := buildIntervals(revLines, true)
+
+	result := &model.TestResult{
+		Timestamp:        time.Now(),
+		Direction:        "Bidirectional",
+		Intervals:        fwdIntervals,
+		ReverseIntervals: revIntervals,
+	}
+
+	// Build summaries from the final (longest) intervals
+	if len(fwdLines) > 0 {
+		buildSummaryFromParsed(result, fwdLines, false)
+	}
+
+	// Reverse summary — the reverse stream is the local server (receiver side)
+	if len(revLines) > 0 {
+		var revResult model.TestResult
+		buildSummaryFromParsed(&revResult, revLines, true)
+		result.ReverseReceivedBps = revResult.ReceivedBps
+		if result.ReverseReceivedBps == 0 {
+			result.ReverseReceivedBps = revResult.FwdReceivedBps
+		}
+		result.ReverseBytesReceived = revResult.BytesReceived
+		result.ReverseJitterMs = revResult.JitterMs
+		if result.ReverseJitterMs == 0 {
+			result.ReverseJitterMs = revResult.FwdJitterMs
+		}
+		result.ReverseLostPackets = revResult.LostPackets
+		if result.ReverseLostPackets == 0 {
+			result.ReverseLostPackets = revResult.FwdLostPackets
+		}
+		result.ReversePackets = revResult.Packets
+		if result.ReversePackets == 0 {
+			result.ReversePackets = revResult.FwdPackets
+		}
+		result.ReverseLostPercent = revResult.LostPercent
+		if result.ReverseLostPercent == 0 {
+			result.ReverseLostPercent = revResult.FwdLostPercent
+		}
+	}
+
+	// Set actual duration
+	if len(result.Intervals) > 0 {
+		result.ActualDuration = result.Intervals[len(result.Intervals)-1].TimeEnd
+	} else if len(result.ReverseIntervals) > 0 {
+		result.ActualDuration = result.ReverseIntervals[len(result.ReverseIntervals)-1].TimeEnd
+	}
+
 	return result, nil
 }
 
-// fillReverseSummaryFromStreams computes reverse summary fields from per-stream
-// data when the JSON didn't include sum_sent_bidir_reverse / sum_received_bidir_reverse
-// (e.g. in --json-stream mode). Only acts when reverse summary is missing but
-// reverse streams (Sender=false) are present.
-// fillUDPBidirFwdJitter extracts the forward-direction jitter for UDP bidir tests.
-// In batch (-J) mode, sender=true UDP stream entries contain server-measured jitter.
-// In --json-stream mode, client-side stream entries have jitter_ms=0 for the sender;
-// instead the server's data is embedded in server_output_json within the end event.
-// We check both sources: client-side streams first, then server_output_json.
-func fillUDPBidirFwdJitter(r *model.TestResult, end iperfEnd) {
-	if r.FwdJitterMs != 0 {
-		return // already set
+// buildIntervals groups parsed lines by time bucket and aggregates them into intervals.
+func buildIntervals(lines []*parsedLine, isServer bool) []model.IntervalResult {
+	type bucket struct {
+		lines []*parsedLine
 	}
-	// Try client-side streams (works in batch -J mode with --get-server-output).
-	var total float64
-	n := 0
-	for _, s := range end.Streams {
-		if s.UDP != nil && s.UDP.Sender && s.UDP.JitterMs > 0 {
-			total += s.UDP.JitterMs
-			n++
+	buckets := map[float64]*bucket{}
+	var keys []float64
+
+	for _, p := range lines {
+		key := roundTime(p.timeStart)
+		b, exists := buckets[key]
+		if !exists {
+			b = &bucket{}
+			buckets[key] = b
+			keys = insertSorted(keys, key)
+		}
+		b.lines = append(b.lines, p)
+	}
+
+	var intervals []model.IntervalResult
+	for _, key := range keys {
+		b := buckets[key]
+		iv := aggregateInterval(b.lines, isServer)
+		if iv != nil {
+			intervals = append(intervals, *iv)
 		}
 	}
-	if n > 0 {
-		r.FwdJitterMs = total / float64(n)
-		return
-	}
-	// Fall back to server_output_json (present in --json-stream + --get-server-output).
-	// The server receives the forward direction, so its sum_received.jitter_ms is
-	// the forward jitter as measured by the server.
-	if end.ServerOutputJson != nil {
-		srvEnd := end.ServerOutputJson.End
-		if srvEnd.SumReceived.JitterMs > 0 {
-			r.FwdJitterMs = srvEnd.SumReceived.JitterMs
-			return
-		}
-		// Also try per-stream entries on the server side.
-		total = 0
-		n = 0
-		for _, s := range srvEnd.Streams {
-			if s.UDP != nil && s.UDP.JitterMs > 0 {
-				total += s.UDP.JitterMs
-				n++
-			}
-		}
-		if n > 0 {
-			r.FwdJitterMs = total / float64(n)
-		}
-	}
+	return intervals
 }
 
-// fillUDPFwdLostFromServer overlays jitter/lost data onto Fwd UDP streams
-// from server_output_json. The server measured loss as the receiver of the
-// forward direction. Client and server socket IDs are independent, so we
-// match by position: the Nth Fwd stream on the client corresponds to the Nth
-// UDP stream entry in the server output.
-func fillUDPFwdLostFromServer(r *model.TestResult, end iperfEnd) {
-	if end.ServerOutputJson == nil {
-		return
-	}
-	// Collect server UDP stream entries where the server is the receiver
-	// (sender=false), i.e. the forward direction (client→server).
-	// In bidir mode the server also has sender=true streams for the reverse
-	// direction; those must be excluded.
-	var srvStreams []iperfStreamUDP
-	for _, s := range end.ServerOutputJson.End.Streams {
-		if s.UDP != nil && !s.UDP.Sender {
-			srvStreams = append(srvStreams, *s.UDP)
-		}
-	}
-	// Populate summary-level fwd metrics from server's sum_received.
-	// For UDP, bits_per_second in sum_received reports the sender's offered rate,
-	// not the actually-delivered rate. Compute actual throughput from bytes/seconds.
-	srvSum := end.ServerOutputJson.End.SumReceived
-	if srvSum.Bytes > 0 && srvSum.Seconds > 0 {
-		r.FwdReceivedBps = float64(srvSum.Bytes) * 8 / srvSum.Seconds
-	}
-	if srvSum.Packets > 0 {
-		r.FwdLostPackets = srvSum.LostPackets
-		r.FwdPackets = srvSum.Packets
-		r.FwdLostPercent = udpLostPct(srvSum.LostPackets, srvSum.Packets, srvSum.LostPercent)
-	}
-
-	if len(srvStreams) == 0 {
-		return
-	}
-	// Overlay onto Fwd streams by position.
-	j := 0
-	for i := range r.Streams {
-		if !r.Streams[i].Sender {
-			continue
-		}
-		if j >= len(srvStreams) {
-			break
-		}
-		srv := srvStreams[j]
-		j++
-		r.Streams[i].LostPackets = srv.LostPackets
-		r.Streams[i].Packets = srv.Packets
-		if srv.Packets > 0 {
-			r.Streams[i].LostPercent = float64(srv.LostPackets) / float64(srv.Packets) * 100
-		}
-	}
+// roundTime rounds a float64 time to the nearest 0.01 for use as a map key.
+func roundTime(t float64) float64 {
+	return math.Round(t*100) / 100
 }
 
-func fillReverseSummaryFromStreams(r *model.TestResult) {
-	if r.ReverseSentBps != 0 {
-		return // already populated from JSON
+// insertSorted inserts v into a sorted slice and returns the new slice.
+func insertSorted(s []float64, v float64) []float64 {
+	i := 0
+	for i < len(s) && s[i] < v {
+		i++
 	}
-	var sentBps, recvBps float64
-	var retransmits int
-	var lostPackets, packets int
-	var lostPercent, jitterMs float64
-	var udpCount int
-	hasReverse := false
-	for _, s := range r.Streams {
-		if !s.Sender {
-			hasReverse = true
-			sentBps += s.SentBps
-			recvBps += s.ReceivedBps
-			retransmits += s.Retransmits
-			if s.JitterMs > 0 || s.Packets > 0 {
-				lostPackets += s.LostPackets
-				packets += s.Packets
-				lostPercent += s.LostPercent
-				jitterMs += s.JitterMs
-				udpCount++
-			}
-		}
-	}
-	if !hasReverse {
-		return
-	}
-	// In --json-stream bidir mode, reverse streams have SentBps=0 (the client
-	// is receiving, not sending). Use ReceivedBps as the throughput metric.
-	if sentBps == 0 && recvBps > 0 {
-		r.ReverseSentBps = recvBps
-		r.ReverseReceivedBps = recvBps
-	} else {
-		r.ReverseSentBps = sentBps
-		r.ReverseReceivedBps = recvBps
-	}
-	r.ReverseRetransmits = retransmits
-	if udpCount > 0 {
-		r.ReverseLostPackets = lostPackets
-		r.ReversePackets = packets
-		r.ReverseLostPercent = lostPercent / float64(udpCount)
-		r.ReverseJitterMs = jitterMs / float64(udpCount)
-	}
+	s = append(s, 0)
+	copy(s[i+1:], s[i:])
+	s[i] = v
+	return s
 }
 
-// udpLostPct returns the best available lost percent for a UDP stream.
-// iperf3 sometimes reports lost_percent=0 even with non-zero lost counts;
-// recompute from counts in that case.
-func udpLostPct(lost, packets int, reported float64) float64 {
-	if reported != 0 {
-		return reported
-	}
-	if packets > 0 && lost > 0 {
-		return float64(lost) / float64(packets) * 100
-	}
-	return 0
-}
-
-// serverTextBw matches iperf3 text receiver lines that report bandwidth.
-// Matches both SUM (multi-stream) and per-stream (single-stream) lines:
-//   [SUM]  0.00-10.00  sec  468 MBytes  392 Mbits/sec  receiver
-//   [SUM][RX-S]  0.00-10.00  sec  468 MBytes  392 Mbits/sec  receiver
-//   [  5][RX-S]  0.00-10.04  sec  101 MBytes  84.7 Mbits/sec  receiver
-// Capture groups: 1=id ("SUM" or socket number), 2=role ("RX-S"/"TX-S" or ""), 3=value, 4=unit
-var serverTextBw = regexp.MustCompile(
-	`^\[\s*(SUM|\d+)\](?:\[([A-Z-]+)\])?\s+[\d.]+-[\d.]+\s+sec\s+[\d.]+\s+\w+Bytes\s+([\d.]+)\s*(G|M|K)?bits/sec.*\breceiver\b`)
-
-// serverTextLost matches iperf3 text summary lines that contain Lost/Total counts.
-// Matches both non-bidir:  [SUM]  0.00-10.00  sec ... 0.314 ms  46522/89300 (52%)  receiver
-// and bidir RX-S:          [SUM][RX-S]  0.00-10.00  sec ... 0.314 ms  46522/89300 (52%)  receiver
-// and per-stream:          [  5]  0.00-10.00  sec ... 0.314 ms  11631/22309 (52%)  receiver
-// Capture groups: 1=socket-id (or "SUM"), 2=role ("RX-S","TX-S", or ""), 3=lost, 4=total
-var serverTextLost = regexp.MustCompile(
-	`^\[\s*(SUM|\d+)\](?:\[([A-Z-]+)\])?\s+[\d.]+-[\d.]+\s+sec\s+.*?\s+(\d+)/(\d+)\s+\([^)]+\)\s+receiver`)
-
-// serverTextStream matches per-stream receiver lines (non-bidir, no role tag):
-// [  5]   0.00-5.25   sec  ...  0.372 ms  11631/22309 (52%)  receiver
-var serverTextStream = regexp.MustCompile(
-	`^\[\s*(\d+)\]\s+[\d.]+-[\d.]+\s+sec\s+.*?\s+(\d+)/(\d+)\s+\([^)]+\)\s+receiver`)
-
-// ParseServerOutputText extracts UDP forward-direction loss from the iperf3
-// server text output (the server_output_text stream event). It overlays
-// FwdLostPackets/FwdPackets on the result and per-stream Fwd streams.
-// isBidir must be true when the test was run with --bidir.
-// It is safe to call when text is empty or the result has no UDP streams.
-func ParseServerOutputText(text string, r *model.TestResult, isBidir bool) {
-	if text == "" {
-		return
-	}
-
-	// Extract server-received forward bandwidth.
-	// Prefer [SUM] line (multi-stream); fall back to summing per-stream lines (single-stream).
-	if r.FwdReceivedBps == 0 {
-		var sumBps float64
-		sumFound := false
-		var streamBps float64
-		streamCount := 0
-		for _, line := range strings.Split(text, "\n") {
-			line = strings.TrimSpace(line)
-			m := serverTextBw.FindStringSubmatch(line)
-			if m == nil {
-				continue
-			}
-			id := m[1]   // "SUM" or socket number string
-			role := m[2] // "RX-S", "TX-S", or ""
-			isFwd := (!isBidir && role == "") || (isBidir && role == "RX-S")
-			if !isFwd {
-				continue
-			}
-			val, err := strconv.ParseFloat(m[3], 64)
-			if err != nil {
-				continue
-			}
-			switch m[4] {
-			case "G":
-				val *= 1e9
-			case "M":
-				val *= 1e6
-			case "K":
-				val *= 1e3
-			}
-			if id == "SUM" {
-				sumBps = val
-				sumFound = true
-				break // SUM is authoritative
-			}
-			streamBps += val
-			streamCount++
-		}
-		if sumFound {
-			r.FwdReceivedBps = sumBps
-		} else if streamCount > 0 {
-			r.FwdReceivedBps = streamBps
-		}
-	}
-
-	if r.Protocol != "UDP" {
-		return
-	}
-
-	var sumLost, sumPkts int
-	sumFound := false
-	// per-stream: socket-id → (lost, total)
-	streamLost := map[int][2]int{}
-
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		m := serverTextLost.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		id := m[1]
-		role := m[2]  // "RX-S", "TX-S", or ""
-		lost, _ := strconv.Atoi(m[3])
-		total, _ := strconv.Atoi(m[4])
-
-		// In bidir mode, fwd loss is on [RX-S] lines (server receiving fwd traffic).
-		// In normal mode, fwd loss is on untagged receiver lines.
-		isFwd := (!isBidir && role == "") || (isBidir && role == "RX-S")
-		if !isFwd {
-			continue
-		}
-
-		if id == "SUM" {
-			sumLost = lost
-			sumPkts = total
-			sumFound = true
-		} else {
-			sock, err := strconv.Atoi(id)
-			if err == nil {
-				streamLost[sock] = [2]int{lost, total}
-			}
-		}
-	}
-
-	if !sumFound && len(streamLost) > 0 {
-		// No SUM line (single stream) — aggregate all per-stream entries.
-		for _, counts := range streamLost {
-			sumLost += counts[0]
-			sumPkts += counts[1]
-		}
-		sumFound = sumPkts > 0
-	}
-	if sumFound && sumPkts > 0 {
-		r.FwdLostPackets = sumLost
-		r.FwdPackets = sumPkts
-		r.FwdLostPercent = udpLostPct(sumLost, sumPkts, 0)
-	}
-
-	if len(streamLost) == 0 {
-		return
-	}
-	// Match server socket IDs to client Fwd streams by position (socket IDs differ).
-	// Build ordered list of server socket IDs as they appeared.
-	var srvOrder []int
-	seen := map[int]bool{}
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		sm := serverTextStream.FindStringSubmatch(line)
-		if sm == nil {
-			// try bidir RX-S per-stream
-			m2 := serverTextLost.FindStringSubmatch(line)
-			if m2 == nil || m2[1] == "SUM" {
-				continue
-			}
-			role := m2[2]
-			isFwd := (!isBidir && role == "") || (isBidir && role == "RX-S")
-			if !isFwd {
-				continue
-			}
-			sock, err := strconv.Atoi(m2[1])
-			if err == nil && !seen[sock] {
-				seen[sock] = true
-				srvOrder = append(srvOrder, sock)
-			}
-			continue
-		}
-		sock, _ := strconv.Atoi(sm[1])
-		if !seen[sock] {
-			seen[sock] = true
-			srvOrder = append(srvOrder, sock)
-		}
-	}
-
-	j := 0
-	for i := range r.Streams {
-		if !r.Streams[i].Sender {
-			continue
-		}
-		if j >= len(srvOrder) {
-			break
-		}
-		sock := srvOrder[j]
-		j++
-		if counts, ok := streamLost[sock]; ok {
-			r.Streams[i].LostPackets = counts[0]
-			r.Streams[i].Packets = counts[1]
-			if counts[1] > 0 {
-				r.Streams[i].LostPercent = float64(counts[0]) / float64(counts[1]) * 100
-			}
-		}
-	}
-}

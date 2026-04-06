@@ -1,157 +1,110 @@
 # GUI vs CLI Modes
 
-The iperf3 Test Tool automatically detects whether to run in GUI mode or CLI mode based on command-line arguments.
+The iperf-tool automatically selects GUI or CLI mode based on command-line arguments.
 
 ## Mode Selection
 
-### GUI Mode (Default)
+### GUI Mode (default)
 ```bash
 iperf-tool
 ```
-No arguments → launches Fyne graphical interface with full feature set.
+No arguments → launches the Fyne graphical interface.
 
 ### CLI Mode
 ```bash
-iperf-tool -c 192.168.1.1 -t 30
+iperf-tool -s 192.168.1.1 -t 30
 ```
-Any flags provided → runs in headless command-line mode.
+Any flags provided → runs headless in the terminal.
 
 ## Comparison
 
 | Feature | GUI | CLI |
 |---------|-----|-----|
-| **Interaction** | Graphical forms | Command-line flags |
-| **Real-time output** | Scrollable text widget with live interval data | Live interval lines printed to stdout |
-| **Test history** | In-memory table | CSV file append |
-| **Preferences** | Persistent between restarts | N/A (flags per invocation) |
-| **Per-stream data** | Formatted on completion | Formatted on completion |
-| **Remote server** | Connect/install/start/stop buttons | Command composition |
-| **Ease of use** | Intuitive for humans | Ideal for scripting/automation |
-| **Batch testing** | One test at a time | Loop-friendly |
-| **Cross-platform** | Requires CGO (Windows needs MinGW) | Pure CLI, CGO-free possible |
-| **Headless environments** | Not suitable | Fully supported |
+| Interaction | Graphical forms | Command-line flags |
+| Real-time output | Live interval widget | Interval lines to stdout |
+| Test history | In-memory table | CSV file append |
+| Persistent preferences | Yes (between restarts) | No (flags per invocation) |
+| Remote server control | Connect/install/start/stop buttons | `--ssh` flags |
+| UDP bidir / reverse | Supported | Supported |
+| Pre-flight UDP probe | Automatic | Automatic |
+| Batch / scripting | One test at a time | Loop-friendly |
+| Headless environments | Not suitable | Fully supported |
 
 ## GUI Mode Features
 
-- **Configuration form** with all iperf3 parameters
-- **Persistent preferences** — form values saved between app restarts
-- **Live interval display** — real-time bandwidth, transfer, and retransmit data at each reporting interval (iperf3 3.17+)
-- **Formatted results** — per-stream throughput breakdown appended on test completion
-- **History table** displaying all past test results
-- **Remote server panel** for SSH management (install, start, stop)
-- **One-click operations** (Start Test, Stop Test, Export CSV)
-- **Dual export** — CSV and TXT files created together
-- **Visual status indicators**
-
-→ See [GUI usage](../README.md) for details
+- Configuration form with all iperf2 parameters (protocol, duration, streams, bandwidth, direction)
+- Persistent preferences — form values saved between restarts
+- Live interval display — bandwidth, loss, jitter updated each reporting interval
+- Formatted summary on test completion (send/receive, jitter, loss per direction)
+- History table of all past test results
+- Remote panel — SSH connect, install iperf2, start/stop server
+- Start/Stop test buttons with status feedback
+- CSV + TXT export
 
 ## CLI Mode Features
 
-- **Flags for all parameters** (server, port, protocol, duration, etc.)
-- **SSH integration** (install, start, stop remote servers)
-- **Batch automation** (run multiple tests in loops)
-- **Scripting-friendly** (exit codes, CSV output, no UI blocking)
-- **Live interval output** (bandwidth/transfer/retransmits per interval with iperf3 3.17+)
-- **Verbose mode** (additional status messages with `-v`)
-- **Remote operations** (install iperf3, manage servers)
-
-→ See [CLI.md](CLI.md) for complete flag reference and examples
+- Flags for all test parameters
+- SSH integration — install, start/stop remote iperf2, run remote client for reverse/bidir
+- Pre-flight UDP probe automatically selects direct mode vs SSH fallback
+- Repeat mode (`--repeat`, `--repeat-count`) for continuous monitoring
+- Live interval output to stdout during test
+- Verbose mode (`-v`) for probe status and extra messages
+- Debug mode (`--debug`) logs raw iperf2 output to OS temp directory
+- CSV + TXT export with `-o`
 
 ## Workflows
 
-### Interactive Testing (GUI)
+### Interactive testing (GUI)
 1. Open app
-2. Fill form with test parameters
-3. Click "Start Test"
-4. View live output and historical results
-5. Export results to CSV
+2. Fill in server address, protocol, duration, streams
+3. Optionally connect SSH for reverse/bidir tests
+4. Click Start Test
+5. Watch live intervals; review summary and history
 
-### Automated Testing (CLI)
+### Automated testing (CLI)
 ```bash
-# Single test
-iperf-tool -c server -t 30 -o results.csv
+# Single UDP bidir test
+iperf-tool --ssh host --user ubuntu -s host -u --bidir -t 10 -b 20M -o results.csv
 
-# Loop over servers
-for server in server1 server2 server3; do
-  iperf-tool -c $server -t 30 -o results.csv
+# Loop over multiple servers
+for host in host1 host2 host3; do
+  iperf-tool --ssh $host --user ubuntu -s $host -t 30 -o batch.csv
 done
 
-# Complex workflow
-iperf-tool -ssh host1 -user root -key key.pem \
-  -install -start-server -c host1 -t 30 -o test.csv
+# Continuous monitoring with repeat
+iperf-tool --ssh host --user ubuntu -s host -u --bidir -t 10 --repeat -o monitor.csv
 ```
-
-### Hybrid Approach
-Run CLI tests to gather data, then open GUI to review results:
-```bash
-# Batch testing
-iperf-tool -c 192.168.1.1 -t 30 -o batch.csv
-iperf-tool -c 192.168.1.2 -t 30 -o batch.csv
-
-# View results in GUI
-iperf-tool  # Open GUI and import batch.csv
-```
-
-## Which Mode to Use?
-
-| Scenario | Use |
-|----------|-----|
-| One-off testing | GUI |
-| Repeated tests to same server | GUI (history) |
-| Multiple servers/scheduling | CLI |
-| Integration with other tools | CLI |
-| Performance monitoring | CLI + cron/systemd |
-| CI/CD pipelines | CLI |
-| Network troubleshooting | GUI (visual feedback) |
-| Large-scale testing | CLI (scriptable) |
 
 ## Technical Details
 
-### Mode Detection Logic
-
+### Mode detection
 1. Parse `os.Args`
-2. If no args or `help` → GUI mode
-3. If any flags detected → CLI mode
-4. CLI flags determine operation type:
-   - Has `-c` → local test
-   - Has `-ssh` → remote server management
-   - Both → start remote, then test locally
+2. No args or `help` → GUI mode (launches Fyne window)
+3. Any flags → CLI mode
 
-### shared Components
+### CLI flag mapping
+- Has `-s` only → local test (server must already be running)
+- Has `--ssh` only → remote server management (install/start/stop)
+- Has `--ssh` + `-s` → SSH connect, then run test (most common)
+- Has `-R` or `--bidir` → requires `--ssh` to drive the remote client
 
+### Shared components
 Both modes use the same core engine:
-- `internal/iperf` — runner and parser (supports both `-J` and `--json-stream` modes)
-- `internal/ssh` — remote control
-- `internal/export` — CSV writing (summary + interval logs)
-- `internal/format` — result and interval formatting
-- `internal/model` — result structs (TestResult, IntervalResult, StreamResult)
+- `internal/iperf` — `Runner`, `ParseOutput`, `ValidateServerReport`, `ProbeUDPReachability`
+- `internal/ssh` — SSH connection and command execution
+- `internal/format` — interval and result formatting
+- `internal/model` — `TestResult`, `IntervalResult`
+- `internal/export` — CSV/TXT writing
 
-### Independence
+### UDP bidir mode selection
+`Runner.RunBidir()` and `Runner.RunForward()` call `ProbeUDPReachability()` before starting the test:
+- **Direct mode** (probe open): Server Report parsed from client stdout; `ValidateServerReport()` acts as secondary safety net
+- **SSH fallback** (probe blocked/error): server output read from remote `-o` file via SSH after graceful kill + 500ms wait
 
-- **GUI** imports `ui/` package, Fyne library
-- **CLI** imports `internal/cli/` package, standard library only
-- Build supports both simultaneously
-
-## Running in Container/Headless
-
-For servers without X11 or Wayland:
-
-```bash
-# CLI only (no GUI dependencies)
-iperf-tool -c server -t 30 -o results.csv
-
-# Not available
-iperf-tool  # Would fail without display
-```
-
-## Performance
-
-- **GUI**: ~33 MB binary size, depends on Fyne/CGO
-- **CLI**: Pure Go CLI subset could be optimized separately
-- **Runtime**: Same core engine, no performance difference for tests
+In both modes, the remote server is started with `-o <file>` so that SSH file fallback is always available. If direct mode's Server Report is fabricated (0.000ms jitter — common under severe congestion, NAT, or Tailscale), the tool automatically falls back to reading the server output file via SSH.
 
 ## See Also
 
-- [CLI.md](CLI.md) — Comprehensive CLI flag reference
-- [INSTALLATION.md](INSTALLATION.md) — Remote iperf3 setup
-- [README.md](../README.md) — General overview
+- [CLI.md](CLI.md) — Complete CLI flag reference and examples
+- [INSTALLATION.md](INSTALLATION.md) — Remote iperf2 installation
+- [docs/tech/iperf2-udp-bidir-findings.md](tech/iperf2-udp-bidir-findings.md) — UDP bidir implementation findings

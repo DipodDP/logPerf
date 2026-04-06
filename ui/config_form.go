@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"runtime"
 	"strconv"
 
 	"fyne.io/fyne/v2"
@@ -10,7 +11,7 @@ import (
 	"iperf-tool/internal/iperf"
 )
 
-// ConfigForm holds the GUI form fields for iperf3 configuration.
+// ConfigForm holds the GUI form fields for iperf2 configuration.
 type ConfigForm struct {
 	serverEntry      *widget.Entry
 	portEntry        *widget.Entry
@@ -21,10 +22,13 @@ type ConfigForm struct {
 	directionRadio   *widget.RadioGroup
 	blockSizeEntry   *widget.Entry
 	bandwidthEntry   *widget.Entry
-	congestionSelect *widget.Select
 	measurePingCheck *widget.Check
+	ipv6Check        *widget.Check
 	binaryEntry      *widget.Entry
 	form             *fyne.Container
+
+	// OnProtocolChange is called when the protocol radio selection changes.
+	OnProtocolChange func(protocol string)
 }
 
 // NewConfigForm creates a new configuration form with default values.
@@ -50,7 +54,11 @@ func NewConfigForm() *ConfigForm {
 	cf.durationEntry = widget.NewEntry()
 	cf.durationEntry.SetText("10")
 
-	cf.protocolRadio = widget.NewRadioGroup([]string{"TCP", "UDP"}, nil)
+	cf.protocolRadio = widget.NewRadioGroup([]string{"TCP", "UDP"}, func(selected string) {
+		if cf.OnProtocolChange != nil {
+			cf.OnProtocolChange(selected)
+		}
+	})
 	cf.protocolRadio.SetSelected("TCP")
 	cf.protocolRadio.Horizontal = true
 
@@ -64,14 +72,17 @@ func NewConfigForm() *ConfigForm {
 	cf.bandwidthEntry = widget.NewEntry()
 	cf.bandwidthEntry.SetPlaceHolder("100M, 1G")
 
-	cf.congestionSelect = widget.NewSelect([]string{"default", "bbr", "cubic", "reno", "vegas"}, nil)
-	cf.congestionSelect.SetSelected("default")
-
 	cf.measurePingCheck = widget.NewCheck("Measure Ping", nil)
+	cf.ipv6Check = widget.NewCheck("IPv6", nil)
 
 	cf.binaryEntry = widget.NewEntry()
-	cf.binaryEntry.SetText("iperf3")
-	cf.binaryEntry.SetPlaceHolder("/usr/local/bin/iperf3")
+	if runtime.GOOS == "windows" {
+		cf.binaryEntry.SetText("iperf.exe")
+		cf.binaryEntry.SetPlaceHolder(`C:\iperf2\iperf.exe`)
+	} else {
+		cf.binaryEntry.SetText("iperf")
+		cf.binaryEntry.SetPlaceHolder("/usr/local/bin/iperf")
+	}
 
 	connection := container.NewVBox(
 		widget.NewForm(
@@ -79,6 +90,7 @@ func NewConfigForm() *ConfigForm {
 			widget.NewFormItem("Port", cf.portEntry),
 			widget.NewFormItem("Protocol", cf.protocolRadio),
 		),
+		cf.ipv6Check,
 	)
 
 	testParams := container.NewVBox(
@@ -95,8 +107,7 @@ func NewConfigForm() *ConfigForm {
 			widget.NewFormItem("Streams", cf.parallelEntry),
 			widget.NewFormItem("Bandwidth", cf.bandwidthEntry),
 			widget.NewFormItem("Block Size", cf.blockSizeEntry),
-			widget.NewFormItem("Congestion", cf.congestionSelect),
-			widget.NewFormItem("iperf3 path", cf.binaryEntry),
+			widget.NewFormItem("iperf path", cf.binaryEntry),
 		),
 	)
 
@@ -155,10 +166,8 @@ func (cf *ConfigForm) LoadPreferences(prefs fyne.Preferences) {
 	if v := prefs.String("config.bandwidth"); v != "" {
 		cf.bandwidthEntry.SetText(v)
 	}
-	if v := prefs.String("config.congestion"); v != "" {
-		cf.congestionSelect.SetSelected(v)
-	}
 	cf.measurePingCheck.SetChecked(prefs.Bool("config.measure_ping"))
+	cf.ipv6Check.SetChecked(prefs.Bool("config.ipv6"))
 	if v := prefs.String("config.binary"); v != "" {
 		cf.binaryEntry.SetText(v)
 	}
@@ -175,8 +184,8 @@ func (cf *ConfigForm) SavePreferences(prefs fyne.Preferences) {
 	prefs.SetString("config.direction", cf.directionRadio.Selected)
 	prefs.SetString("config.block_size", cf.blockSizeEntry.Text)
 	prefs.SetString("config.bandwidth", cf.bandwidthEntry.Text)
-	prefs.SetString("config.congestion", cf.congestionSelect.Selected)
 	prefs.SetBool("config.measure_ping", cf.measurePingCheck.Checked)
+	prefs.SetBool("config.ipv6", cf.ipv6Check.Checked)
 	prefs.SetString("config.binary", cf.binaryEntry.Text)
 }
 
@@ -197,11 +206,6 @@ func (cf *ConfigForm) Config() iperf.IperfConfig {
 	reverse := cf.directionRadio.Selected == "Reverse"
 	bidir := cf.directionRadio.Selected == "Bidir"
 
-	congestion := ""
-	if cf.congestionSelect.Selected != "default" {
-		congestion = cf.congestionSelect.Selected
-	}
-
 	return iperf.IperfConfig{
 		BinaryPath:  cf.binaryEntry.Text,
 		ServerAddr:  cf.serverEntry.Text,
@@ -214,7 +218,8 @@ func (cf *ConfigForm) Config() iperf.IperfConfig {
 		Reverse:     reverse,
 		Bidir:       bidir,
 		Bandwidth:   cf.bandwidthEntry.Text,
-		Congestion:  congestion,
 		MeasurePing: cf.measurePingCheck.Checked,
+		IPv6:        cf.ipv6Check.Checked,
+		Enhanced:    true,
 	}
 }

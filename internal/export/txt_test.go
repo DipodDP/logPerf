@@ -497,10 +497,6 @@ func TestWriteTXT_WithTCPIntervals(t *testing.T) {
 	if !strings.Contains(content, "Timestamp") {
 		t.Error("interval table should have Timestamp column header")
 	}
-	// JSON-stream mode recorded in header
-	if !strings.Contains(content, "JSON-stream") {
-		t.Error("header should note JSON-stream mode")
-	}
 	// Actual duration in summary
 	if !strings.Contains(content, "Actual duration: 2.0 s") {
 		t.Error("summary should show actual duration")
@@ -613,7 +609,7 @@ func TestWriteTXT_MeasurementID(t *testing.T) {
 	if !strings.Contains(content, "Hostname:        myhost") {
 		t.Error("missing hostname")
 	}
-	if !strings.Contains(content, "iperf3 version:  3.17") {
+	if !strings.Contains(content, "iperf version:   3.17") {
 		t.Error("missing iperf version")
 	}
 }

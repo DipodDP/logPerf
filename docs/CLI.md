@@ -1,326 +1,232 @@
 # Command-Line Interface (CLI)
 
-The iperf3 Test Tool supports full command-line operation for scripting, automation, and headless environments. Run with no arguments to launch the GUI, or provide flags for CLI mode.
+The iperf-tool supports full command-line operation for scripting, automation, and headless environments. Run with no arguments to launch the GUI, or provide flags for CLI mode.
 
 ## Quick Start
 
-### Run a local test
 ```bash
-iperf-tool -c 192.168.1.1 -t 30 -P 4 -o results.csv
-```
+# Forward test (local → remote server)
+iperf-tool --ssh remote.host --user ubuntu -s remote.host -t 30
 
-### Test against a remote server
-```bash
-iperf-tool -ssh remote.host -user ubuntu -key ~/.ssh/id_rsa \
-  -start-server -c remote.host -t 30 -o results.csv
-```
+# UDP bidirectional test
+iperf-tool --ssh remote.host --user ubuntu -s remote.host -u --bidir -t 10 -P 2 -b 20M
 
-### Install iperf3 on remote host
-```bash
-iperf-tool -ssh remote.host -user ubuntu -key ~/.ssh/id_rsa -install
-```
-
-## Usage
-
-### No arguments → GUI mode
-```bash
-iperf-tool
-```
-Launches the Fyne graphical interface.
-
-### Help
-```bash
-iperf-tool help
-iperf-tool --help
-iperf-tool -h
+# Reverse test (remote → local)
+iperf-tool --ssh remote.host --user ubuntu -s remote.host -R -t 10
 ```
 
 ## Flags
 
-### Local Test (required: `-c`)
+### Local Test
 
 | Flag | Long Form | Description | Default |
 |------|-----------|-------------|---------|
-| `-c` | `-connect` | Server address (IP or hostname) | - |
-| `-p` | `-port` | Server port | 5201 |
-| `-P` | `-parallel` | Number of parallel streams | 1 |
-| `-t` | `-time` | Test duration in seconds | 10 |
-| `-i` | `-interval` | Reporting interval in seconds | 1 |
-| `-u` | - | Protocol mode (`tcp` or `udp`) | tcp |
-| `-binary` | - | Path to iperf3 binary | iperf3 |
+| `-s` | `--server` | Server address (IP or hostname) | — |
+| `-p` | `--port` | Server port | 5201 |
+| `-P` | `--parallel` | Parallel streams (uses port range internally) | 1 |
+| `-t` | `--time` | Test duration in seconds | 10 |
+| `-i` | `--interval` | Reporting interval in seconds | 1 |
+| `-u` | — | UDP mode (shorthand for `--protocol udp`) | — |
+| `--protocol` | — | `tcp` or `udp` | tcp |
+| `-l` | `--block-size` | Datagram/buffer size in bytes | iperf2 default |
+| `-b` | `--bandwidth` | Target bandwidth, e.g. `100M`, `1G` (UDP only) | unlimited |
+| `-R` | `--reverse` | Reverse mode — remote sends, local receives | false |
+| `--bidir` | — | Bidirectional — both directions simultaneously | false |
+| `-V` | `--ipv6` | Use IPv6 | false |
+| `--ping` | — | Measure latency before and during test | false |
+| `--binary` | — | Path to iperf2 binary | `iperf` (Windows: `iperf.exe`) |
 
-### Remote Server (required: `-ssh`)
+### Remote Server (SSH)
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-ssh` | SSH host to manage remote iperf3 | - |
-| `-user` | SSH username | `$USER` environment variable |
-| `-key` | SSH private key path | - |
-| `-password` | SSH password (insecure) | - |
-| `-ssh-port` | SSH port | 22 |
-| `-install` | Install iperf3 on remote host | false |
-| `-start-server` | Start remote iperf3 server | false |
-| `-stop-server` | Stop remote iperf3 server | false |
+| `--ssh` | SSH host to manage remote iperf2 server/client | — |
+| `--user` | SSH username | `$USER` / `%USERNAME%` |
+| `--key` | SSH private key path | auto-discover |
+| `--password` | SSH password (insecure, prefer `--key`) | — |
+| `--ssh-port` | SSH port | 22 |
+| `--install` | Install iperf2 on remote host | false |
+| `--start-server` | Start remote iperf2 server | false |
+| `--stop-server` | Stop remote iperf2 server | false |
+
+### Repeat
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--repeat` | Repeat measurements in a loop until Ctrl-C | false |
+| `--repeat-count` | Number of iterations (0 = infinite) | 0 |
 
 ### Output
 
 | Flag | Long Form | Description | Default |
 |------|-----------|-------------|---------|
-| `-o` | `-output` | Save results to CSV file | - |
-| `-v` | `-verbose` | Verbose output (show raw iperf3 output in fallback mode, extra status messages) | false |
+| `-o` | `--output` | Output base path; date suffix added automatically | — |
+| `-v` | `--verbose` | Show probe status and extra messages | false |
+| `--debug` | — | Log raw iperf2 output to OS temp directory | false |
 
 ## Examples
 
-### 1. Simple local test
+### 1. Simple TCP forward test
 ```bash
-iperf-tool -c 192.168.1.1
+iperf-tool --ssh server.example.com --user ubuntu -s server.example.com -t 30
 ```
-Runs a 10-second test to 192.168.1.1:5201 with 1 parallel stream.
 
-### 2. Extended test with multiple streams
+### 2. UDP bidirectional test, 2 streams, 20 Mbps each direction
 ```bash
-iperf-tool -c server.example.com -t 60 -P 8 -o results.csv
+iperf-tool --ssh server.example.com --user ubuntu \
+  -s server.example.com -u --bidir -t 10 -P 2 -b 20M -v
 ```
-60-second test with 8 parallel streams, saves results to CSV.
+The pre-flight UDP reachability probe runs automatically. If inbound UDP is open (VPN, LAN, public IPs), direct mode is used — no SSH file overhead. If NAT is blocking, SSH fallback is selected automatically.
 
-### 3. UDP test
+### 3. Reverse test (remote → local)
 ```bash
-iperf-tool -c 10.0.0.1 -u udp -t 20 -P 4
+iperf-tool --ssh server.example.com --user ubuntu \
+  -s server.example.com -R -t 10 -u -b 50M
 ```
-20-second UDP test with 4 parallel streams.
 
-### 4. Test with live interval output
+### 4. Multiple parallel streams
 ```bash
-iperf-tool -c 192.168.1.1 -t 30
+iperf-tool --ssh server.example.com --user ubuntu \
+  -s server.example.com -P 4 -t 30 -o results.csv
 ```
-With iperf3 3.17+, live interval measurements are printed as the test runs:
-```
-Interval                Bandwidth     Transfer  Retransmits
-------------------------------------------------------------
-[  0.0-  1.0 sec]    940.25 Mbps   117.53 MB   0 retransmits
-[  1.0-  2.0 sec]    938.10 Mbps   117.26 MB   2 retransmits
-...
-```
-Older iperf3 versions fall back to standard JSON mode (use `-v` to see raw output).
+For UDP, `-P 4` uses a port range (e.g. 5201-5204) on both server and client, bypassing the iperf2 Windows `udp_accept` race condition.
 
-### 5. Install iperf3 and start server
+### 5. Repeat mode — continuous monitoring
 ```bash
-iperf-tool -ssh remote.host -user ubuntu -key ~/.ssh/id_rsa \
-  -install -start-server -p 5201
-```
-Automatically installs iperf3 (if needed) and starts the server on port 5201.
+# Loop forever until Ctrl-C
+iperf-tool --ssh server.example.com --user ubuntu \
+  -s server.example.com -u --bidir -t 10 --repeat
 
-### 6. Run test against remote server
-```bash
-iperf-tool -ssh remote.host -user ubuntu -key ~/.ssh/id_rsa \
-  -start-server -c remote.host -t 30 -P 4 -o results.csv
+# Exactly 5 runs
+iperf-tool --ssh server.example.com --user ubuntu \
+  -s server.example.com -t 10 --repeat --repeat-count 5
 ```
-Starts remote server, then runs a 30-second test with 4 streams from the local machine.
 
-### 7. Stop remote server
+### 6. Install iperf2 on remote host
 ```bash
-iperf-tool -ssh remote.host -user ubuntu -key ~/.ssh/id_rsa -stop-server
+iperf-tool --ssh server.example.com --user ubuntu --install
 ```
-Stops the remote iperf3 server.
 
-### 8. Combine install + start + test + stop
+### 7. Full workflow: install, test, save results
 ```bash
-iperf-tool -ssh remote.host -user ubuntu -key ~/.ssh/id_rsa \
-  -install -start-server -c remote.host -t 10 -v -o test.csv && \
-iperf-tool -ssh remote.host -user ubuntu -key ~/.ssh/id_rsa -stop-server
+iperf-tool --ssh server.example.com --user ubuntu \
+  --install -s server.example.com -t 30 -P 2 -o results.csv -v
 ```
-Full workflow: install, start, run test, output results. Stop in separate command to reuse connection.
+
+### 8. Debug raw iperf2 output
+```bash
+iperf-tool --ssh server.example.com --user ubuntu \
+  -s server.example.com -u --bidir -t 5 --debug
+# macOS/Linux: cat $TMPDIR/iperf-debug.log or /tmp/iperf-debug.log
+# Windows: type %TEMP%\iperf-debug.log
+```
+
+## Output Format
+
+### Interval display (during test)
+
+**TCP / UDP forward:**
+```
+Time      Mbps         MB           Retransmits
+--------------------------------------------------
+14:30:01  245.30       29.13        2
+14:30:02  248.10       29.48        0
+```
+
+**UDP bidirectional:**
+```
+Time      Fwd Mbps     Rev Mbps     Fwd MB     Rev MB     Rev Jitter   Rev Lost
+------------------------------------------------------------------------------------
+14:30:01  21.00        20.80        2.50       2.48       3.641 ms     0/1784 (0.0%)
+```
+
+### Summary
+
+```
+=== Test Results ===
+Timestamp:       2026-03-21 14:30:00
+Server:          server.example.com:5201
+Protocol:        UDP
+Direction:       Bidirectional
+Bandwidth Target: 10.00 Mbps/stream
+Parallel:        2 streams
+Duration:        10 seconds
+
+--- Summary ---
+Client Send:     21.00 Mbps
+Server Recv:     20.95 Mbps
+Server Send:     20.80 Mbps
+Client Recv:     20.75 Mbps
+C→S Jitter:      4.56 ms
+C→S Lost:        0/8920 (0.00%)
+S→C Lost:        3/8880 (0.03%)
+C→S transferred: 25.00 MB sent / 24.94 MB received
+S→C transferred: 25.00 MB sent / 24.93 MB received
+```
+
+`Server Recv` and `C→S Jitter/Lost` come from the remote server's measurement (authoritative receive-side stats). When SSH is connected, the server output file is always available as a fallback — if the iperf2 Server Report is fabricated (e.g. severe congestion, NAT, Tailscale), the tool automatically reads server-side data via SSH.
+
+### CSV export
+
+With `-o results.csv`, two files are written:
+- `results_<date>.csv` — per-interval log (bandwidth, loss, jitter per second)
+- `results_log.csv` — cumulative summary log (one row per test run)
 
 ## Authentication
 
-### Using SSH Key (recommended)
+### SSH key (recommended)
 ```bash
-iperf-tool -ssh remote.host -user ubuntu -key ~/.ssh/id_rsa -install
+iperf-tool --ssh remote.host --user ubuntu --key ~/.ssh/id_ed25519 -s remote.host -t 10
 ```
+Keys in `~/.ssh/` (id_ed25519, id_rsa, id_ecdsa) are auto-discovered. SSH agent is also used automatically.
 
-### Using SSH Password (not recommended)
+### SSH password (not recommended)
 ```bash
-iperf-tool -ssh remote.host -user ubuntu -password "mypass" -install
-```
-⚠️ **Warning**: Passing passwords on the command line is insecure and visible in process listings. Use SSH keys instead.
-
-## Remote Installation
-
-When you use `-install`, the tool automatically:
-
-1. **Detects the remote OS** (Linux, macOS, or Windows)
-2. **Finds available package manager** (apt, yum, dnf, apk, pacman, brew, chocolatey, winget)
-3. **Verifies sudo/admin privileges** (requires passwordless sudo or UAC elevation)
-4. **Installs iperf3** with appropriate commands
-5. **Verifies installation** by checking if iperf3 is in PATH
-
-Supported platforms:
-- **Linux**: Debian/Ubuntu (apt), RHEL/CentOS (yum/dnf), Alpine (apk), Arch (pacman)
-- **macOS**: Homebrew
-- **Windows**: Chocolatey or WinGet
-
-See [INSTALLATION.md](INSTALLATION.md) for details.
-
-## Output
-
-### Results Format
-
-With iperf3 3.17+, live interval measurements are displayed during the test, followed by the final summary:
-
-```
-Starting test: 192.168.1.1:5201 (TCP, 4 parallel, 30s duration)
-Interval                Bandwidth     Transfer  Retransmits
-------------------------------------------------------------
-[  0.0-  1.0 sec]    920.15 Mbps   115.02 MB   3 retransmits
-[  1.0-  2.0 sec]    940.25 Mbps   117.53 MB   0 retransmits
-[  2.0-  3.0 sec]    938.10 Mbps   117.26 MB   2 retransmits
-...
-
-=== Test Results ===
-Timestamp:       2024-01-15 14:30:45
-Server:          192.168.1.1:5201
-Protocol:        TCP
-Parallel:        4 streams
-Duration:        30 seconds
-
---- Per-Stream Results ---
-Stream 1:  Sent: 235.12 Mbps  Received: 234.06 Mbps
-Stream 2:  Sent: 235.13 Mbps  Received: 234.06 Mbps
-Stream 3:  Sent: 235.12 Mbps  Received: 234.06 Mbps
-Stream 4:  Sent: 235.13 Mbps  Received: 234.07 Mbps
-
---- Summary ---
-Sent:            940.50 Mbps
-Received:        936.25 Mbps
-Retransmits:     42
-====================
+iperf-tool --ssh remote.host --user ubuntu --password "mypass" -s remote.host -t 10
 ```
 
-Per-stream section is only shown when using more than 1 parallel stream. A warning is displayed if per-stream totals don't match the summary values.
+## UDP Probe Behavior
 
-With older iperf3 versions (< 3.17), the tool falls back to standard JSON mode — no live intervals are shown, but the final summary is identical.
+Before every UDP reverse or bidirectional test, a pre-flight reachability probe runs:
 
-### CSV Export
+1. Binds a local UDP socket on an ephemeral port
+2. Instructs the remote via SSH to send a single UDP packet to `local-ip:port`
+3. Waits up to 2 seconds
 
-With `-o results.csv`, results are appended to a CSV file:
+| Result | Mode selected |
+|--------|--------------|
+| Packet received | Direct mode — Server Report from client stdout |
+| Timeout | SSH fallback — server output read from remote `-o` file |
+| SSH error | SSH fallback (safe default) |
 
-```csv
-Timestamp,Server,Port,Parallel,Duration,Protocol,Sent_Mbps,Received_Mbps,Retransmits,Error
-2024-01-15 14:30:45,192.168.1.1,5201,4,30,TCP,940.50,936.25,42,
-```
-
-Multiple test runs append to the same file, creating a historical log.
-
-### Interval Log CSV
-
-When using `-o` with iperf3 3.17+, a companion interval log is automatically created at `<name>_log.csv`:
-
-```csv
-interval_start,interval_end,bandwidth_mbps,transfer_mb,retransmits
-0.0,1.0,920.15,115.02,3
-1.0,2.0,940.25,117.53,0
-2.0,3.0,938.10,117.26,2
-```
-
-This provides per-interval granularity for detailed analysis and graphing.
+With `-v`, the probe result is printed: `UDP reachability probe: open — using direct mode`.
 
 ## Exit Codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Error (invalid flags, test failure, etc.) |
-
-## Scripting Examples
-
-### Batch testing multiple servers
-```bash
-#!/bin/bash
-servers=("192.168.1.1" "192.168.1.2" "192.168.1.3")
-for server in "${servers[@]}"; do
-  iperf-tool -c "$server" -t 30 -o batch_results.csv
-done
-```
-
-### Daily performance monitoring
-```bash
-#!/bin/bash
-timestamp=$(date +%Y%m%d_%H%M%S)
-iperf-tool -c production.server \
-  -t 60 -P 8 \
-  -o "perf_${timestamp}.csv" -v
-```
-
-### Remote server management
-```bash
-#!/bin/bash
-host="test-server.internal"
-user="ec2-user"
-key="/path/to/key.pem"
-
-# Install and prepare
-iperf-tool -ssh "$host" -user "$user" -key "$key" -install
-
-# Run periodic tests
-for i in {1..5}; do
-  echo "Test run $i..."
-  iperf-tool -ssh "$host" -user "$user" -key "$key" \
-    -start-server -c "$host" -t 30 -o results.csv
-  sleep 60
-done
-
-# Cleanup
-iperf-tool -ssh "$host" -user "$user" -key "$key" -stop-server
-```
+| 1 | Error (invalid flags, SSH failure, test error) |
 
 ## Troubleshooting
 
-### "must provide -c <server> or -ssh <host>"
-You need either a server address for local test or SSH host for remote operations.
-
-### "invalid config: port must be between 1 and 65535"
-Check that `-p` value is a valid port number.
+### "must provide -s <server> or --ssh <host>"
+Provide `-s <addr>` for a local test or `--ssh <host>` for remote operations.
 
 ### "SSH connect: permission denied"
-Verify SSH credentials (username, key path, password). Check if user has access to the host.
+Check SSH credentials. Key auto-discovery looks for `~/.ssh/id_ed25519`, `id_rsa`, `id_ecdsa` and the SSH agent.
 
-### "requires sudo/administrator privileges to install iperf3"
-The remote user must be in sudoers (Linux/macOS) or have Administrator privileges (Windows).
+### "Server Recv: N/A" in UDP results
+The forward Server Report ACK did not arrive and SSH file fallback was unavailable (no SSH connection). When SSH is connected, server data is always retrieved via SSH file fallback automatically. Without SSH, try reducing `-b` bandwidth — the link may be saturated.
 
-### "iperf3 command not found"
-Make sure iperf3 is installed on the local machine or remote server. Use `-install` flag for remote servers.
+### "start remote server: remote command failed"
+iperf2 (`iperf` or `iperf.exe`) must be in the remote PATH. Use `--install` to install it, or verify with `ssh user@host iperf --version`.
 
-### "iperf3 X.XX found, but --json-stream requires >= 3.17"
-Live interval reporting requires iperf3 3.17+. The tool automatically falls back to standard JSON mode. To get live intervals, upgrade iperf3:
-- **macOS**: `brew upgrade iperf3`
-- **Ubuntu/Debian**: Install from source or a PPA (default packages may be too old)
-- **Arch**: `pacman -Syu iperf3`
-
-### "no supported package manager found"
-The remote system's package manager is not supported. Install iperf3 manually or check supported OS list.
-
-## Advanced
-
-### Custom iperf3 binary
-If you've compiled iperf3 from source or have a custom binary:
-```bash
-iperf-tool -c server -binary /opt/custom/iperf3
-```
-
-### Non-standard SSH port
-```bash
-iperf-tool -ssh remote.host -ssh-port 2222 -user ubuntu -key ~/.ssh/id_rsa -install
-```
-
-### Combining multiple remote operations
-The tool allows chaining operations: install, then start server, then run test from same connection.
-```bash
-iperf-tool -ssh myhost -user root -key key.pem \
-  -install -start-server -c myhost -t 30 -o results.csv
-```
-All operations happen in order, then the SSH connection is closed.
+### High loss on bidirectional UDP
+Bidirectional UDP doubles the offered load on the link. Reduce `-b` to stay within link capacity. Total load = `-b` × `-P` × 2 directions.
 
 ## See Also
 
-- [INSTALLATION.md](INSTALLATION.md) — Remote iperf3 installation details
-- [README.md](../README.md) — General application documentation
+- [MODES.md](MODES.md) — GUI vs CLI comparison
+- [INSTALLATION.md](INSTALLATION.md) — Remote iperf2 installation details
+- [docs/tech/iperf2-udp-bidir-findings.md](tech/iperf2-udp-bidir-findings.md) — UDP bidir implementation findings

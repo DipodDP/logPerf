@@ -5,11 +5,11 @@ import (
 	"os"
 	"os/signal"
 	"sync/atomic"
-	"syscall"
 
 	"fyne.io/fyne/v2/app"
 
 	"iperf-tool/internal/cli"
+	"iperf-tool/internal/iperf"
 	"iperf-tool/ui"
 )
 
@@ -35,12 +35,12 @@ func main() {
 }
 
 func runCLI(cfg *cli.RunnerConfig) error {
-	// Handle remote server operations
+	// Handle remote server operations (connect SSH first, then optionally test)
 	if cfg.SSHHost != "" {
 		return runRemoteServer(cfg)
 	}
 
-	// Handle repeat mode
+	// Handle repeat mode (local only)
 	if cfg.Repeat {
 		return runCLIRepeat(cfg)
 	}
@@ -57,7 +57,7 @@ func runCLI(cfg *cli.RunnerConfig) error {
 
 func runCLIRepeat(cfg *cli.RunnerConfig) error {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, os.Interrupt)
 
 	var stopped int32
 
@@ -106,7 +106,7 @@ func runRemoteServer(cfg *cli.RunnerConfig) error {
 		return err
 	}
 
-	// Install iperf3 if requested
+	// Install iperf2 if requested
 	if cfg.InstallIperf {
 		if err := runner.Install(); err != nil {
 			return err
@@ -129,6 +129,19 @@ func runRemoteServer(cfg *cli.RunnerConfig) error {
 
 	// Run local test if server address provided
 	if cfg.ServerAddr != "" {
+		cfg.SSHClient = runner.Client()
+		cfg.IsWindows = runner.IsWindows()
+		// For reverse/bidir the remote client needs our local IP
+		if (cfg.Reverse || cfg.Bidir) && cfg.SSHClient != nil {
+			if lap, ok := cfg.SSHClient.(iperf.LocalAddrProvider); ok {
+				cfg.LocalAddr = lap.LocalAddr()
+			}
+		}
+
+		if cfg.Repeat {
+			return runCLIRepeat(cfg)
+		}
+
 		result, err := cli.LocalTestRunner(*cfg)
 		if err != nil {
 			return err

@@ -8,8 +8,10 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
+	"iperf-tool/internal/iperf"
 	internalssh "iperf-tool/internal/ssh"
 )
 
@@ -21,25 +23,33 @@ type RemotePanel struct {
 	passwordEntry *widget.Entry
 	portEntry     *widget.Entry
 
-	connectBtn    *widget.Button
-	disconnectBtn *widget.Button
-	installBtn    *widget.Button
-	startSrvBtn   *widget.Button
-	stopSrvBtn    *widget.Button
-	statusEntry *ReadOnlyEntry
+	connectBtn        *widget.Button
+	disconnectBtn     *widget.Button
+	installBtn        *widget.Button
+	startSrvBtn       *widget.Button
+	stopSrvBtn        *widget.Button
+	setupLocalSSHBtn  *widget.Button // visible only on Windows
+	setupRemoteSSHBtn *widget.Button // visible after connect when remote is Windows
+	statusEntry       *ReadOnlyEntry
 
 	client    *internalssh.Client
 	srvMgr    *internalssh.ServerManager
 	container *fyne.Container
+	win       fyne.Window // needed for dialogs
 
 	// OnConnect is called with the SSH host after a successful connection.
 	OnConnect func(host string)
+
+	// OnOSDetected is called after a successful connection once the remote OS
+	// has been probed. isWindows is true if the remote was detected as Windows.
+	OnOSDetected func(host string, isWindows bool)
 }
 
 // NewRemotePanel creates the SSH remote server control panel.
-func NewRemotePanel() *RemotePanel {
+func NewRemotePanel(win fyne.Window) *RemotePanel {
 	rp := &RemotePanel{
 		srvMgr: internalssh.NewServerManager(),
+		win:    win,
 	}
 
 	rp.hostEntry = widget.NewEntry()
@@ -71,7 +81,7 @@ func NewRemotePanel() *RemotePanel {
 	rp.disconnectBtn = widget.NewButton("Disconnect SSH", rp.onDisconnect)
 	rp.disconnectBtn.Disable()
 
-	rp.installBtn = widget.NewButton("Install iperf3", rp.onInstall)
+	rp.installBtn = widget.NewButton("Install iperf2", rp.onInstall)
 	rp.installBtn.Disable()
 
 	rp.startSrvBtn = widget.NewButton("Start Server", rp.onStartServer)
@@ -79,18 +89,28 @@ func NewRemotePanel() *RemotePanel {
 	rp.stopSrvBtn = widget.NewButton("Stop Server", rp.onStopServer)
 	rp.stopSrvBtn.Disable()
 
+	rp.setupLocalSSHBtn = widget.NewButton("Setup Local SSH Server", rp.onSetupLocalSSH)
+	if runtime.GOOS != "windows" {
+		rp.setupLocalSSHBtn.Hide()
+	}
+
+	rp.setupRemoteSSHBtn = widget.NewButton("Setup Remote SSH", rp.onSetupRemoteSSH)
+	rp.setupRemoteSSHBtn.Hide()
+
 	connection := container.NewVBox(
 		widget.NewLabel("Host"), rp.hostEntry,
 		widget.NewLabel("Username"), rp.userEntry,
 		widget.NewLabel("SSH Key Path"), rp.keyPathEntry,
 		widget.NewLabel("Password"), rp.passwordEntry,
 		container.NewHBox(rp.connectBtn, rp.disconnectBtn),
+		rp.setupLocalSSHBtn,
 	)
 
 	control := container.NewVBox(
 		widget.NewLabel("Server Port"), rp.portEntry,
 		rp.installBtn,
 		container.NewHBox(rp.startSrvBtn, rp.stopSrvBtn),
+		rp.setupRemoteSSHBtn,
 	)
 
 	accordion := widget.NewAccordion(
@@ -137,6 +157,12 @@ func (rp *RemotePanel) SavePreferences(prefs fyne.Preferences) {
 }
 
 func (rp *RemotePanel) onConnect() {
+	rp.ConnectAsync(nil)
+}
+
+// ConnectAsync triggers SSH connection using the panel's current field values.
+// The optional onDone callback is called with nil on success or an error on failure.
+func (rp *RemotePanel) ConnectAsync(onDone func(err error)) {
 	cfg := internalssh.ConnectConfig{
 		Host:     rp.hostEntry.Text,
 		Port:     22,
@@ -155,20 +181,31 @@ func (rp *RemotePanel) onConnect() {
 				rp.statusEntry.SetText(fmt.Sprintf("Error: %v", err))
 				rp.connectBtn.Enable()
 			})
+			if onDone != nil {
+				onDone(err)
+			}
 			return
 		}
 
-		// Check if iperf3 itself is already installed
-		installed, _ := client.CheckIperf3Installed()
+		// Check if iperf2 is already installed
+		installed, _ := client.CheckIperfInstalled()
 
 		// Read the configured port on the UI thread, then start the server.
 		portCh := make(chan int, 1)
 		fyne.Do(func() { portCh <- rp.getPort() })
 		port := <-portCh
 
-		// Always restart the server on connect so we own the bgSession.
-		// This avoids inheriting a stale process we can't control.
-		startErr := rp.srvMgr.RestartServer(client, port)
+		// Only attempt server start if iperf2 is installed.
+		var startErr error
+		if installed {
+			startErr = rp.srvMgr.RestartServer(client, port, 0)
+		}
+
+		// Detect remote OS for Windows-specific UI
+		isWin := false
+		if osType, osErr := client.DetectOS(); osErr == nil && osType == internalssh.OSWindows {
+			isWin = true
+		}
 
 		fyne.Do(func() {
 			rp.client = client
@@ -176,13 +213,27 @@ func (rp *RemotePanel) onConnect() {
 
 			if installed {
 				rp.installBtn.Disable()
-				rp.installBtn.SetText("iperf3 Installed")
+				rp.installBtn.SetText("iperf2 Installed")
 			} else {
 				rp.installBtn.Enable()
-				rp.installBtn.SetText("Install iperf3")
+				rp.installBtn.SetText("Install iperf2")
 			}
 
-			if startErr != nil {
+			// Show/hide Windows-specific setup button
+			if isWin {
+				rp.setupRemoteSSHBtn.Show()
+			} else {
+				rp.setupRemoteSSHBtn.Hide()
+			}
+
+			if rp.OnOSDetected != nil {
+				rp.OnOSDetected(cfg.Host, isWin)
+			}
+
+			if !installed {
+				rp.statusEntry.SetText(fmt.Sprintf("Connected to %s (iperf2 not installed — use Install button)", cfg.Host))
+				rp.startSrvBtn.Disable()
+			} else if startErr != nil {
 				rp.statusEntry.SetText(fmt.Sprintf("Connected to %s (server start failed: %v)", cfg.Host, startErr))
 				rp.startSrvBtn.Enable()
 			} else {
@@ -193,24 +244,37 @@ func (rp *RemotePanel) onConnect() {
 				}
 			}
 		})
+
+		if onDone != nil {
+			onDone(nil)
+		}
 	}()
 }
 
-// RestartServer kills any stuck iperf3 processes on the remote host and
-// starts a fresh server. Returns nil if no SSH connection is active.
-func (rp *RemotePanel) RestartServer() error {
+// RestartServer kills any stuck iperf2 processes on the remote host and
+// starts a fresh server. numInstances controls how many server instances
+// to start (0 = default of 2).
+func (rp *RemotePanel) RestartServer(numInstances ...int) error {
 	if rp.client == nil {
 		return fmt.Errorf("not connected via SSH")
 	}
 
 	port := rp.getPort()
+	n := 0
+	if len(numInstances) > 0 {
+		n = numInstances[0]
+	}
 
-	if err := rp.srvMgr.RestartServer(rp.client, port); err != nil {
+	if err := rp.srvMgr.RestartServer(rp.client, port, n); err != nil {
 		return err
 	}
 
+	lastPort := port + 1
+	if n > 1 {
+		lastPort = port + n - 1
+	}
 	fyne.Do(func() {
-		rp.statusEntry.SetText(fmt.Sprintf("Server restarted on port %d", port))
+		rp.statusEntry.SetText(fmt.Sprintf("Server restarted on ports %d–%d", port, lastPort))
 		rp.startSrvBtn.Disable()
 		rp.stopSrvBtn.Enable()
 	})
@@ -222,12 +286,42 @@ func (rp *RemotePanel) IsConnected() bool {
 	return rp.client != nil
 }
 
+// Client returns the active SSH client, or nil if not connected.
+func (rp *RemotePanel) Client() iperf.SSHClient {
+	if rp.client == nil {
+		return nil
+	}
+	return rp.client
+}
+
 // Host returns the configured SSH host address.
 func (rp *RemotePanel) Host() string {
 	return rp.hostEntry.Text
 }
 
-// getPort returns the configured iperf3 server port, or 5201 if invalid.
+// IsWindows returns true if the connected remote host was detected as Windows.
+// Returns false if not connected or OS detection fails.
+func (rp *RemotePanel) IsWindows() bool {
+	if rp.client == nil {
+		return false
+	}
+	osType, err := rp.client.DetectOS()
+	if err != nil {
+		return false
+	}
+	return osType == internalssh.OSWindows
+}
+
+// LocalAddr returns the local IP address of the SSH connection, or empty if
+// not connected.
+func (rp *RemotePanel) LocalAddr() string {
+	if rp.client == nil {
+		return ""
+	}
+	return rp.client.LocalAddr()
+}
+
+// getPort returns the configured iperf2 server port, or 5201 if invalid.
 func (rp *RemotePanel) getPort() int {
 	return parsePort(rp.portEntry.Text, 5201)
 }
@@ -243,6 +337,7 @@ func (rp *RemotePanel) onDisconnect() {
 	rp.installBtn.Disable()
 	rp.startSrvBtn.Disable()
 	rp.stopSrvBtn.Disable()
+	rp.setupRemoteSSHBtn.Hide()
 }
 
 func (rp *RemotePanel) onStartServer() {
@@ -256,14 +351,14 @@ func (rp *RemotePanel) onStartServer() {
 	rp.statusEntry.SetText("Starting server...")
 
 	go func() {
-		err := rp.srvMgr.RestartServer(rp.client, port)
+		err := rp.srvMgr.RestartServer(rp.client, port, 0)
 		fyne.Do(func() {
 			if err != nil {
 				rp.statusEntry.SetText(fmt.Sprintf("Error: %v", err))
 				rp.startSrvBtn.Enable()
 				return
 			}
-			rp.statusEntry.SetText(fmt.Sprintf("Server running on port %d", port))
+			rp.statusEntry.SetText(fmt.Sprintf("Server running on ports %d, %d", port, port+1))
 			rp.stopSrvBtn.Enable()
 		})
 	}()
@@ -297,17 +392,95 @@ func (rp *RemotePanel) onInstall() {
 	}
 
 	rp.installBtn.Disable()
-	rp.statusEntry.SetText("Installing iperf3...")
+	rp.statusEntry.SetText("Installing iperf2...")
 
 	go func() {
-		defer rp.installBtn.Enable()
-
-		if err := rp.client.InstallIperf3(); err != nil {
-			rp.statusEntry.SetText(fmt.Sprintf("Install failed: %v", err))
+		if err := rp.client.InstallIperf(); err != nil {
+			fyne.Do(func() {
+				rp.statusEntry.SetText(fmt.Sprintf("Install failed: %v", err))
+				rp.installBtn.Enable()
+			})
 			return
 		}
 
-		rp.statusEntry.SetText("iperf3 installed successfully")
+		fyne.Do(func() {
+			rp.installBtn.Disable()
+			rp.installBtn.SetText("iperf2 Installed")
+			rp.startSrvBtn.Enable()
+			rp.statusEntry.SetText("iperf2 installed successfully — use Start Server")
+		})
 	}()
+}
+
+func (rp *RemotePanel) onSetupLocalSSH() {
+	keyEntry := widget.NewEntry()
+	keyEntry.SetPlaceHolder("ssh-ed25519 AAAA... (optional)")
+	keyEntry.MultiLine = false
+
+	content := container.NewVBox(
+		widget.NewLabel("This will install OpenSSH Server, configure sshd,\nand open firewall ports 22 and 5201.\nRequires Administrator privileges."),
+		widget.NewLabel("Public Key (optional)"),
+		keyEntry,
+	)
+
+	d := dialog.NewCustomConfirm("Setup Local SSH Server", "Setup", "Cancel", content, func(ok bool) {
+		if !ok {
+			return
+		}
+		rp.setupLocalSSHBtn.Disable()
+		rp.statusEntry.SetText("Setting up local SSH server...")
+
+		go func() {
+			out, err := internalssh.SetupWindowsSSHLocal(keyEntry.Text)
+			fyne.Do(func() {
+				rp.setupLocalSSHBtn.Enable()
+				if err != nil {
+					rp.statusEntry.SetText(fmt.Sprintf("Local SSH setup failed: %v", err))
+				} else {
+					_ = out
+					rp.statusEntry.SetText("Local SSH server configured successfully")
+				}
+			})
+		}()
+	}, rp.win)
+	d.Show()
+}
+
+func (rp *RemotePanel) onSetupRemoteSSH() {
+	if rp.client == nil {
+		return
+	}
+
+	keyEntry := widget.NewEntry()
+	keyEntry.SetPlaceHolder("ssh-ed25519 AAAA... (optional)")
+	keyEntry.MultiLine = false
+
+	content := container.NewVBox(
+		widget.NewLabel("This will configure OpenSSH Server on the remote\nWindows host: install sshd, set firewall rules\nfor SSH (22) and iperf2 (5201 TCP+UDP)."),
+		widget.NewLabel("Public Key (optional)"),
+		keyEntry,
+	)
+
+	d := dialog.NewCustomConfirm("Setup Remote SSH Server", "Setup", "Cancel", content, func(ok bool) {
+		if !ok {
+			return
+		}
+		rp.setupRemoteSSHBtn.Disable()
+		rp.statusEntry.SetText("Setting up remote SSH server...")
+
+		go func() {
+			out, err := internalssh.SetupWindowsSSHRemote(rp.client, keyEntry.Text)
+			fyne.Do(func() {
+				rp.setupRemoteSSHBtn.Enable()
+				if err != nil {
+					rp.statusEntry.SetText(fmt.Sprintf("Remote SSH setup failed: %v", err))
+				} else {
+					_ = out
+					rp.statusEntry.SetText("Remote SSH server configured successfully")
+				}
+			})
+		}()
+	}, rp.win)
+	d.Show()
 }
 

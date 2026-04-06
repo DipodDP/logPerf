@@ -19,28 +19,28 @@ import (
 // RunnerConfig holds all CLI options for a test run.
 type RunnerConfig struct {
 	// Local test
-	ServerAddr string
-	Port       int
-	Parallel   int
-	Duration   int
-	Interval   int
-	Protocol   string
-	BinaryPath string
+	ServerAddr  string
+	Port        int
+	Parallel    int
+	Duration    int
+	Interval    int
+	Protocol    string
+	BinaryPath  string
 	BlockSize   int
 	MeasurePing bool
-	Reverse    bool
-	Bidir      bool
-	Bandwidth  string
-	Congestion string
+	Reverse     bool
+	Bidir       bool
+	Bandwidth   string
+	IPv6        bool
 
 	// Remote server (optional)
-	SSHHost     string
-	SSHUser     string
-	SSHKeyPath  string
-	SSHPassword string
-	SSHPort     int
-	StartServer bool
-	StopServer  bool
+	SSHHost      string
+	SSHUser      string
+	SSHKeyPath   string
+	SSHPassword  string
+	SSHPort      int
+	StartServer  bool
+	StopServer   bool
 	InstallIperf bool
 
 	// Repeat
@@ -51,13 +51,18 @@ type RunnerConfig struct {
 	OutputCSV string
 	Verbose   bool
 	Debug     bool
+
+	// SSH client — set after Connect(), used by Reverse/Bidir/Forward with SSH
+	SSHClient iperf.SSHClient
+	// IsWindows — set after Connect() if remote is Windows
+	IsWindows bool
+	// LocalAddr — local IP for reverse/bidir (remote client connects back here)
+	LocalAddr string
 }
 
-// LocalTestRunner runs a single iperf3 test locally and optionally saves results.
-// It uses --json-stream mode for live interval reporting when iperf3 >= 3.17,
-// falling back to -J mode otherwise.
+// LocalTestRunner runs a single iperf2 test locally and optionally saves results.
 func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
-	iperfCfg := iperf.IperfConfig{
+	iperfCfg := iperf.Config{
 		BinaryPath: cfg.BinaryPath,
 		ServerAddr: cfg.ServerAddr,
 		Port:       cfg.Port,
@@ -69,7 +74,10 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 		Reverse:    cfg.Reverse,
 		Bidir:      cfg.Bidir,
 		Bandwidth:  cfg.Bandwidth,
-		Congestion: cfg.Congestion,
+		IPv6:       cfg.IPv6,
+		IsWindows:  cfg.IsWindows,
+		LocalAddr:  cfg.LocalAddr,
+		Enhanced:   true,
 	}
 
 	if err := iperfCfg.Validate(); err != nil {
@@ -125,8 +133,53 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 		}()
 	}
 
-	// Run iperf test
-	result, iperfVersion, err := runIperfTest(runner, iperfCfg, cfg)
+	// Print interval header
+	isUDP := strings.EqualFold(iperfCfg.Protocol, "udp")
+	if iperfCfg.Bidir {
+		header := "Time      " + format.FormatBidirIntervalHeader(isUDP)
+		fmt.Println(header)
+		fmt.Println(strings.Repeat("-", len(header)))
+	} else {
+		header := "Time      " + format.FormatIntervalHeader(isUDP)
+		fmt.Println(header)
+		fmt.Println(strings.Repeat("-", len(header)))
+	}
+
+	testStart := time.Now()
+
+	onInterval := func(fwd, rev *model.IntervalResult) {
+		if fwd == nil && rev == nil {
+			return
+		}
+		ref := fwd
+		if ref == nil {
+			ref = rev
+		}
+		ts := testStart.Add(time.Duration(ref.TimeStart * float64(time.Second))).Format("15:04:05")
+		if iperfCfg.Bidir {
+			fmt.Println(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
+		} else if fwd != nil {
+			fmt.Println(ts + "  " + format.FormatInterval(fwd, isUDP))
+		}
+	}
+
+	// Run iperf test — dispatch based on direction
+	var result *model.TestResult
+	var err error
+
+	version, _ := iperf.CheckVersion(iperfCfg.BinaryPath)
+
+	if iperfCfg.Bidir {
+		if cfg.SSHClient == nil {
+			result, err = runner.RunBidirDualtest(ctx, iperfCfg, onInterval)
+		} else {
+			result, err = runner.RunBidir(ctx, iperfCfg, cfg.SSHClient, onInterval)
+		}
+	} else if iperfCfg.Reverse {
+		result, err = runner.RunReverse(ctx, iperfCfg, cfg.SSHClient, onInterval)
+	} else {
+		result, err = runner.RunForward(ctx, iperfCfg, cfg.SSHClient, onInterval)
+	}
 
 	// Stop background ping and collect result
 	var pingBaseline, pingLoaded *model.PingResult
@@ -145,11 +198,8 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 	result.PingLoaded = pingLoaded
 
 	// Set config echo fields on the result.
-	// Always override with config values — parsed values may be empty on
-	// partial runs (e.g. connection refused after start event).
 	iperfCfg.ApplyToResult(result, "CLI")
-	result.Congestion = cfg.Congestion
-	result.IperfVersion = iperfVersion
+	result.IperfVersion = version
 	if h, herr := os.Hostname(); herr == nil {
 		result.LocalHostname = h
 	}
@@ -161,62 +211,6 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 
 	saveResults(result, cfg)
 	return result, nil
-}
-
-func runIperfTest(runner *iperf.Runner, iperfCfg iperf.IperfConfig, cfg RunnerConfig) (*model.TestResult, string, error) {
-	version, versionErr := iperf.CheckVersion(iperfCfg.BinaryPath)
-	if versionErr != nil {
-		fmt.Printf("Note: %v — falling back to standard JSON mode (no live intervals)\n", versionErr)
-		result, err := runner.RunWithPipe(context.Background(), iperfCfg, func(line string) {
-			if cfg.Verbose {
-				fmt.Println(line)
-			}
-		})
-		return result, version, err
-	}
-
-	isUDP := strings.EqualFold(iperfCfg.Protocol, "udp")
-	if iperfCfg.Bidir {
-		header := "Time      " + format.FormatBidirIntervalHeader(isUDP)
-		fmt.Println(header)
-		fmt.Println(strings.Repeat("-", len(header)))
-	} else {
-		header := "Time      " + format.FormatIntervalHeader(isUDP)
-		fmt.Println(header)
-		fmt.Println(strings.Repeat("-", len(header)))
-	}
-
-	testStart := time.Now()
-	result, err := runner.RunWithIntervals(context.Background(), iperfCfg, func(fwd, rev *model.IntervalResult) {
-		ts := testStart.Add(time.Duration(fwd.TimeStart * float64(time.Second))).Format("15:04:05")
-		if rev != nil {
-			fmt.Println(ts + "  " + format.FormatBidirInterval(fwd, rev, isUDP))
-		} else {
-			fmt.Println(ts + "  " + format.FormatInterval(fwd, isUDP))
-		}
-	})
-
-	// Fall back to standard -J mode on iperf3 stream-socket errors (UDP EAGAIN bug).
-	// Exception: UDP bidir also fails in -J mode on Windows/Cygwin servers —
-	// surface a helpful error rather than retrying pointlessly.
-	if err != nil && isStreamSocketError(err) {
-		if strings.EqualFold(iperfCfg.Protocol, "udp") && iperfCfg.Bidir {
-			return nil, version, fmt.Errorf("UDP bidirectional mode is not supported by the remote iperf3 server (known Cygwin/Windows limitation); use TCP for bidir, or UDP with Normal/Reverse direction")
-		}
-		fmt.Printf("Note: stream mode failed (%v) — retrying in standard JSON mode\n", err)
-		result, err = runner.RunWithPipe(context.Background(), iperfCfg, func(line string) {
-			if cfg.Verbose {
-				fmt.Println(line)
-			}
-		})
-	}
-	return result, version, err
-}
-
-func isStreamSocketError(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "unable to read from stream socket") ||
-		strings.Contains(msg, "unable to receive control message")
 }
 
 func saveResults(result *model.TestResult, cfg RunnerConfig) {
@@ -251,7 +245,7 @@ func saveResults(result *model.TestResult, cfg RunnerConfig) {
 	fmt.Printf("Results saved: %s, %s\n", logPath, txtPath)
 }
 
-// RemoteServerRunner manages a remote iperf3 server via SSH.
+// RemoteServerRunner manages a remote iperf2 server via SSH.
 type RemoteServerRunner struct {
 	cfg    RunnerConfig
 	client *ssh.Client
@@ -297,27 +291,27 @@ func (r *RemoteServerRunner) Close() error {
 	return nil
 }
 
-// Install attempts to install iperf3 on the remote host.
+// Install attempts to install iperf2 on the remote host.
 func (r *RemoteServerRunner) Install() error {
 	if r.client == nil {
 		return fmt.Errorf("not connected")
 	}
 
 	if r.cfg.Verbose {
-		fmt.Println("Checking/installing iperf3 on remote host...")
+		fmt.Println("Checking/installing iperf2 on remote host...")
 	}
 
-	if err := r.client.InstallIperf3(); err != nil {
-		return fmt.Errorf("install iperf3: %w", err)
+	if err := r.client.InstallIperf(); err != nil {
+		return fmt.Errorf("install iperf2: %w", err)
 	}
 
 	if r.cfg.Verbose {
-		fmt.Println("iperf3 ready on remote host")
+		fmt.Println("iperf2 ready on remote host")
 	}
 	return nil
 }
 
-// Start starts the remote iperf3 server.
+// Start starts the remote iperf2 server.
 func (r *RemoteServerRunner) Start() error {
 	if r.client == nil {
 		return fmt.Errorf("not connected")
@@ -329,7 +323,7 @@ func (r *RemoteServerRunner) Start() error {
 	}
 
 	if r.cfg.Verbose {
-		fmt.Printf("Starting remote iperf3 server on port %d...\n", port)
+		fmt.Printf("Starting remote iperf2 servers on ports %d, %d...\n", port, port+1)
 	}
 
 	if err := r.mgr.StartServer(r.client, port); err != nil {
@@ -337,19 +331,32 @@ func (r *RemoteServerRunner) Start() error {
 	}
 
 	if r.cfg.Verbose {
-		fmt.Println("Remote server started")
+		fmt.Printf("Remote servers started on ports %d, %d\n", port, port+1)
 	}
 	return nil
 }
 
-// Stop stops the remote iperf3 server.
+// Restart kills any existing iperf2 processes and starts a fresh server.
+// numInstances controls how many server instances to start (0 = default of 2).
+func (r *RemoteServerRunner) Restart(numInstances int) error {
+	if r.client == nil {
+		return fmt.Errorf("not connected")
+	}
+	port := r.cfg.Port
+	if port == 0 {
+		port = 5201
+	}
+	return r.mgr.RestartServer(r.client, port, numInstances)
+}
+
+// Stop stops the remote iperf2 server.
 func (r *RemoteServerRunner) Stop() error {
 	if r.client == nil {
 		return fmt.Errorf("not connected")
 	}
 
 	if r.cfg.Verbose {
-		fmt.Println("Stopping remote iperf3 server...")
+		fmt.Println("Stopping remote iperf2 server...")
 	}
 
 	if err := r.mgr.StopServer(r.client); err != nil {
@@ -368,6 +375,20 @@ func (r *RemoteServerRunner) CheckStatus() (bool, error) {
 		return false, fmt.Errorf("not connected")
 	}
 	return r.mgr.CheckStatus(r.client)
+}
+
+// Client returns the underlying SSH client for use with the iperf2 runner.
+func (r *RemoteServerRunner) Client() *ssh.Client {
+	return r.client
+}
+
+// IsWindows returns true if the remote host is running Windows.
+func (r *RemoteServerRunner) IsWindows() bool {
+	if r.client == nil {
+		return false
+	}
+	os, err := r.client.DetectOS()
+	return err == nil && os == ssh.OSWindows
 }
 
 // PrintResult formats and prints a test result.

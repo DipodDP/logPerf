@@ -1,27 +1,66 @@
 package ui
 
 import (
+	"strings"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
 
+const windowsHostsPrefKey = "remote.known_windows_hosts"
+
 // BuildMainWindow creates and configures the main application window.
 func BuildMainWindow(app fyne.App) fyne.Window {
-	win := app.NewWindow("iperf3 Test Tool")
+	win := app.NewWindow("iperf2 Test Tool")
 
 	configForm := NewConfigForm()
-	remotePanel := NewRemotePanel()
+	remotePanel := NewRemotePanel(win)
 	outputView := NewOutputView()
 	savedFilesList := NewSavedFilesList()
 	controls := NewControls(configForm, outputView, savedFilesList, remotePanel, win)
+
+	prefs := app.Preferences()
 
 	// Auto-fill the server address from the SSH host on successful connect.
 	remotePanel.OnConnect = func(host string) {
 		configForm.SetServerAddrIfEmpty(host)
 	}
 
-	prefs := app.Preferences()
+	// Remember Windows hosts so we can warn about UDP-without-SSH next time.
+	remotePanel.OnOSDetected = func(host string, isWindows bool) {
+		if host == "" {
+			return
+		}
+		known := loadKnownWindowsHosts(prefs)
+		if isWindows {
+			if _, ok := known[host]; !ok {
+				known[host] = struct{}{}
+				saveKnownWindowsHosts(prefs, known)
+			}
+		} else if _, ok := known[host]; ok {
+			delete(known, host)
+			saveKnownWindowsHosts(prefs, known)
+		}
+	}
+
+	// Controls consults this to decide whether UDP-without-SSH should warn.
+	controls.IsHostKnownWindows = func(host string) bool {
+		if host == "" {
+			return false
+		}
+		known := loadKnownWindowsHosts(prefs)
+		_, ok := known[host]
+		return ok
+	}
+
+	// Show informational note when switching to UDP with a Windows remote.
+	configForm.OnProtocolChange = func(protocol string) {
+		if protocol == "UDP" && remotePanel.IsConnected() && remotePanel.IsWindows() {
+			outputView.AppendLine("Note: UDP + Windows remote — SSH fallback will be used for server-side statistics.")
+		}
+	}
+
 	configForm.LoadPreferences(prefs)
 	remotePanel.LoadPreferences(prefs)
 	controls.LoadPreferences(prefs)
@@ -92,4 +131,29 @@ func BuildMainWindow(app fyne.App) fyne.Window {
 	})
 
 	return win
+}
+
+// loadKnownWindowsHosts returns the set of hosts previously detected as Windows.
+func loadKnownWindowsHosts(prefs fyne.Preferences) map[string]struct{} {
+	s := prefs.String(windowsHostsPrefKey)
+	out := make(map[string]struct{})
+	if s == "" {
+		return out
+	}
+	for _, h := range strings.Split(s, ",") {
+		h = strings.TrimSpace(h)
+		if h != "" {
+			out[h] = struct{}{}
+		}
+	}
+	return out
+}
+
+// saveKnownWindowsHosts persists the set of Windows hosts to preferences.
+func saveKnownWindowsHosts(prefs fyne.Preferences, hosts map[string]struct{}) {
+	parts := make([]string, 0, len(hosts))
+	for h := range hosts {
+		parts = append(parts, h)
+	}
+	prefs.SetString(windowsHostsPrefKey, strings.Join(parts, ","))
 }
