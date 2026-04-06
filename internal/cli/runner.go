@@ -147,7 +147,7 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 
 	testStart := time.Now()
 
-	onInterval := func(fwd, rev *model.IntervalResult) {
+	emit := func(fwd, rev *model.IntervalResult) {
 		if fwd == nil && rev == nil {
 			return
 		}
@@ -161,6 +161,14 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 		} else if fwd != nil {
 			fmt.Println(ts + "  " + format.FormatInterval(fwd, isUDP))
 		}
+	}
+
+	var onInterval func(fwd, rev *model.IntervalResult)
+	var flushIntervals func()
+	if iperfCfg.Bidir {
+		onInterval, flushIntervals = iperf.PairBidirIntervals(emit)
+	} else {
+		onInterval = emit
 	}
 
 	// Run iperf test — dispatch based on direction
@@ -179,6 +187,10 @@ func LocalTestRunner(cfg RunnerConfig) (*model.TestResult, error) {
 		result, err = runner.RunReverse(ctx, iperfCfg, cfg.SSHClient, onInterval)
 	} else {
 		result, err = runner.RunForward(ctx, iperfCfg, cfg.SSHClient, onInterval)
+	}
+
+	if flushIntervals != nil {
+		flushIntervals()
 	}
 
 	// Stop background ping and collect result

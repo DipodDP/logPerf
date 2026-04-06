@@ -158,6 +158,59 @@ func (c *Client) RunCommand(cmd string) (string, error) {
 	return string(out), nil
 }
 
+// RunCommandStream executes a command on the remote host, invoking onLine
+// for each stdout line as it arrives. Stderr is captured and returned along
+// with the full combined output. Useful for live progress streaming.
+func (c *Client) RunCommandStream(cmd string, onLine func(string)) (string, error) {
+	session, err := c.conn.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("create SSH session: %w", err)
+	}
+	defer session.Close()
+
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	if err := session.Start(cmd); err != nil {
+		return "", fmt.Errorf("start remote command: %w", err)
+	}
+
+	var buf strings.Builder
+	doneStderr := make(chan struct{})
+	go func() {
+		sc := bufio.NewScanner(stderr)
+		sc.Buffer(make([]byte, 64*1024), 1024*1024)
+		for sc.Scan() {
+			buf.WriteString(sc.Text())
+			buf.WriteString("\n")
+		}
+		close(doneStderr)
+	}()
+
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		buf.WriteString(line)
+		buf.WriteString("\n")
+		if onLine != nil {
+			onLine(line)
+		}
+	}
+	<-doneStderr
+
+	if err := session.Wait(); err != nil {
+		return buf.String(), fmt.Errorf("remote command %q: %w: %s", cmd, err, buf.String())
+	}
+	return buf.String(), nil
+}
+
 // Close closes the SSH connection.
 func (c *Client) Close() error {
 	if c.conn != nil {

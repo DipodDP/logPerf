@@ -319,7 +319,7 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 	c.outputView.AppendLine(strings.Repeat("-", len(header)))
 
 	testStart := time.Now()
-	onInterval := func(fwd, rev *model.IntervalResult) {
+	emit := func(fwd, rev *model.IntervalResult) {
 		if fwd == nil && rev == nil {
 			return
 		}
@@ -334,6 +334,13 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 			c.outputView.AppendLine(ts + "  " + format.FormatInterval(fwd, isUDP))
 		}
 	}
+	var onInterval func(fwd, rev *model.IntervalResult)
+	var flushIntervals func()
+	if cfg.Bidir {
+		onInterval, flushIntervals = iperf.PairBidirIntervals(emit)
+	} else {
+		onInterval = emit
+	}
 
 	// Get SSH client from remote panel (may be nil if not connected)
 	sshCli := c.remotePanel.Client()
@@ -343,12 +350,6 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 		c.outputView.AppendLine(msg)
 	})
 
-	// Show progress for reverse/bidir (no real-time intervals during test)
-	if cfg.Reverse {
-		c.outputView.AppendLine("Test in progress (reverse direction — results will appear when complete)...")
-	} else if cfg.Bidir {
-		c.outputView.AppendLine("Test in progress (bidirectional — results will appear when complete)...")
-	}
 
 	// Dispatch based on direction
 	var result *model.TestResult
@@ -363,6 +364,9 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 		result, err = c.runner.RunReverse(ctx, cfg, sshCli, onInterval)
 	} else {
 		result, err = c.runner.RunForward(ctx, cfg, sshCli, onInterval)
+	}
+	if flushIntervals != nil {
+		flushIntervals()
 	}
 
 	// If the test failed to reach the server and we have an SSH connection,
@@ -393,6 +397,9 @@ func (c *Controls) runOnce(cfg iperf.IperfConfig) bool {
 					result, err = c.runner.RunReverse(ctx, cfg, sshCli, onInterval)
 				} else {
 					result, err = c.runner.RunForward(ctx, cfg, sshCli, onInterval)
+				}
+				if flushIntervals != nil {
+					flushIntervals()
 				}
 			}
 		} else {

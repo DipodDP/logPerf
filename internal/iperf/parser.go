@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"iperf-tool/internal/model"
@@ -50,6 +51,11 @@ var (
 	// [  1]  0.00-1.00 sec  0.875 MBytes  7.34 Mbits/sec  625/0/0
 	reClientEnhanced = regexp.MustCompile(
 		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+(\d+)/(\d+)/(\d+)`)
+
+	// Enhanced TCP client (no -V): Write/Err only (e.g. Windows iperf2 client)
+	// [  1] 0.00-1.00 sec  8.25 MBytes  69.2 Mbits/sec  67/0
+	reClientWriteErr = regexp.MustCompile(
+		`^\[\s*(\d+)\]\s+([\d.]+)-([\d.]+)\s+sec\s+([\d.]+)\s+MBytes\s+([\d.]+)\s+Mbits/sec\s+(\d+)/(\d+)\s*$`)
 
 	// Enhanced TCP client with -V flag: Write/Err  Rtry  Cwnd/RTT  NetPwr
 	// [  1] 0.00-3.35 sec  28.5 MBytes  71.4 Mbits/sec  229/0          0       NA/98000(49)us    91.10
@@ -135,9 +141,31 @@ func parseSingleLine(line string) (*parsedLine, bool) {
 		return parseClientTCPVerboseMatch(m), true
 	}
 
+	// 3c. Try plain Write/Err client-side (no Rtry, no Timeo)
+	if m := reClientWriteErr.FindStringSubmatch(line); m != nil {
+		p := &parsedLine{}
+		p.streamID, _ = strconv.Atoi(m[1])
+		p.timeStart, _ = strconv.ParseFloat(m[2], 64)
+		p.timeEnd, _ = strconv.ParseFloat(m[3], 64)
+		mb, _ := strconv.ParseFloat(m[4], 64)
+		p.bytes = int64(mb * 1_000_000)
+		bw, _ := strconv.ParseFloat(m[5], 64)
+		p.bandwidthBps = bw * 1_000_000
+		p.writeCount, _ = strconv.Atoi(m[6])
+		p.errCount, _ = strconv.Atoi(m[7])
+		return p, true
+	}
+
 	// 4. Try standard client-side (bandwidth only)
 	if m := reClientInterval.FindStringSubmatch(line); m != nil {
 		return parseClientIntervalMatch(m), true
+	}
+
+	// 5. Try SUM lines (parallel-stream aggregates) — used by streaming display
+	if strings.HasPrefix(line, "[SUM") {
+		if p := parseSumLine(line); p != nil {
+			return p, true
+		}
 	}
 
 	return nil, false
@@ -539,6 +567,219 @@ func buildSummaryFromParsed(result *model.TestResult, parsed []*parsedLine, isSe
 			result.LostPercent = float64(totalLost) / float64(totalPkts) * 100
 		}
 	}
+}
+
+// PairBidirIntervals returns an onInterval callback that buffers half-pairs
+// (forward-only or reverse-only) until the matching opposite half arrives, then
+// emits a combined (fwd, rev) row to `emit`. Pairing is keyed by rounded
+// TimeStart so floating-point jitter between fwd/rev clocks doesn't break it.
+// Lone halves older than two intervals are flushed unpaired so the user always
+// sees data. Flush() drains any remaining buffered halves.
+//
+// The returned callback and Flush are safe for concurrent use.
+func PairBidirIntervals(emit func(fwd, rev *model.IntervalResult)) (onInterval func(fwd, rev *model.IntervalResult), flush func()) {
+	type slot struct {
+		fwd, rev *model.IntervalResult
+	}
+	var (
+		mu      sync.Mutex
+		pending = map[int64]*slot{}
+		order   []int64 // insertion order of keys
+	)
+
+	keyOf := func(iv *model.IntervalResult) int64 {
+		// Round to nearest 100ms — interval starts align to whole seconds
+		// for typical -i 1, but we tolerate small skew.
+		return int64(iv.TimeStart*10 + 0.5)
+	}
+
+	onInterval = func(fwd, rev *model.IntervalResult) {
+		if fwd == nil && rev == nil {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		ref := fwd
+		if ref == nil {
+			ref = rev
+		}
+		k := keyOf(ref)
+		s, ok := pending[k]
+		if !ok {
+			s = &slot{}
+			pending[k] = s
+			order = append(order, k)
+		}
+		if fwd != nil {
+			s.fwd = fwd
+		}
+		if rev != nil {
+			s.rev = rev
+		}
+		if s.fwd != nil && s.rev != nil {
+			emit(s.fwd, s.rev)
+			delete(pending, k)
+			// remove k from order
+			for i, kk := range order {
+				if kk == k {
+					order = append(order[:i], order[i+1:]...)
+					break
+				}
+			}
+		}
+	}
+
+	flush = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, k := range order {
+			if s := pending[k]; s != nil {
+				emit(s.fwd, s.rev)
+			}
+		}
+		pending = map[int64]*slot{}
+		order = nil
+	}
+	return
+}
+
+// IntervalAggregator accumulates per-stream interval lines that share a
+// TimeStart into a single combined IntervalResult. It is used when iperf2 is
+// run with -P N>1 — each interval produces N per-stream rows (and a SUM row),
+// which the streaming display would otherwise emit individually. The aggregator
+// holds the current bucket until a new TimeStart arrives or Flush is called.
+//
+// Per-stream cumulative "totals" (where TimeStart resets to 0 after we have
+// already seen TimeStart > 0 from the same stream) are dropped. SUM lines are
+// also dropped — when present they would double-count.
+//
+// emit is invoked from the same goroutine that calls Add (or Flush) so it does
+// not need extra synchronization here; callers must serialize Add/Flush.
+type IntervalAggregator struct {
+	emit       func(*model.IntervalResult)
+	maxStart   map[int]float64
+	curStart   float64
+	curEnd     float64
+	curBytes   int64
+	curBwBps   float64
+	curJitter  float64
+	curJitterN int
+	curLost    int
+	curPkts    int
+	curStreams int
+	hasCur     bool
+}
+
+// NewIntervalAggregator builds an aggregator that emits combined intervals.
+func NewIntervalAggregator(emit func(*model.IntervalResult)) *IntervalAggregator {
+	return &IntervalAggregator{emit: emit, maxStart: make(map[int]float64)}
+}
+
+// Add ingests one parsed interval. SUM lines and per-stream cumulative totals
+// are dropped. Per-stream lines are summed into the current bucket; when a new
+// TimeStart arrives, the previous bucket is emitted first.
+func (a *IntervalAggregator) Add(iv *model.IntervalResult) {
+	if iv == nil {
+		return
+	}
+	// Drop per-stream cumulative totals (TimeStart resets to 0 after >0 seen).
+	if iv.StreamID > 0 {
+		prev, seen := a.maxStart[iv.StreamID]
+		if seen && iv.TimeStart == 0 && prev > 0 {
+			return
+		}
+		if iv.TimeStart > prev {
+			a.maxStart[iv.StreamID] = iv.TimeStart
+		}
+	} else {
+		// StreamID == 0 means SUM line (parseSumLine leaves StreamID zero).
+		// Drop it — we sum per-stream lines ourselves to avoid double counting.
+		return
+	}
+
+	if a.hasCur && iv.TimeStart != a.curStart {
+		a.flushCurrent()
+	}
+	if !a.hasCur {
+		a.curStart = iv.TimeStart
+		a.curEnd = iv.TimeEnd
+		a.hasCur = true
+	}
+	a.curBytes += iv.Bytes
+	a.curBwBps += iv.BandwidthBps
+	a.curLost += iv.LostPackets
+	a.curPkts += iv.Packets
+	if iv.JitterMs > 0 {
+		a.curJitter += iv.JitterMs
+		a.curJitterN++
+	}
+	if iv.TimeEnd > a.curEnd {
+		a.curEnd = iv.TimeEnd
+	}
+	a.curStreams++
+}
+
+// Flush emits the current bucket if any data is pending.
+func (a *IntervalAggregator) Flush() {
+	if a.hasCur {
+		a.flushCurrent()
+	}
+}
+
+func (a *IntervalAggregator) flushCurrent() {
+	out := &model.IntervalResult{
+		TimeStart:    a.curStart,
+		TimeEnd:      a.curEnd,
+		Bytes:        a.curBytes,
+		BandwidthBps: a.curBwBps,
+		LostPackets:  a.curLost,
+		Packets:      a.curPkts,
+	}
+	if a.curJitterN > 0 {
+		out.JitterMs = a.curJitter / float64(a.curJitterN)
+	}
+	if a.curPkts > 0 {
+		out.LostPercent = float64(a.curLost) / float64(a.curPkts) * 100
+	}
+	a.emit(out)
+	a.hasCur = false
+	a.curBytes = 0
+	a.curBwBps = 0
+	a.curJitter = 0
+	a.curJitterN = 0
+	a.curLost = 0
+	a.curPkts = 0
+	a.curStreams = 0
+}
+
+// IntervalFilter rejects per-stream and SUM "totals" lines that iperf2 prints
+// after the regular interval rows. The heuristic: once a stream has emitted an
+// interval whose TimeStart > 0, any subsequent line from the same stream whose
+// TimeStart == 0 is the cumulative total and is dropped.
+type IntervalFilter struct {
+	maxStart map[int]float64
+}
+
+// NewIntervalFilter constructs an empty filter ready for use.
+func NewIntervalFilter() *IntervalFilter {
+	return &IntervalFilter{maxStart: make(map[int]float64)}
+}
+
+// Accept returns true if the interval should be forwarded to the caller.
+// It also updates internal per-stream state.
+func (f *IntervalFilter) Accept(iv *model.IntervalResult) bool {
+	if iv == nil {
+		return false
+	}
+	prev, seen := f.maxStart[iv.StreamID]
+	if seen && iv.TimeStart == 0 && prev > 0 {
+		// Per-stream cumulative total — drop.
+		return false
+	}
+	if iv.TimeStart > prev {
+		f.maxStart[iv.StreamID] = iv.TimeStart
+	}
+	return true
 }
 
 // ParseIntervalLine parses a single iperf2 output line into an IntervalResult

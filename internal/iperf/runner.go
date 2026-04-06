@@ -31,6 +31,14 @@ type LocalAddrProvider interface {
 	LocalAddr() string
 }
 
+// StreamingSSHClient is an optional interface for SSH clients that support
+// line-by-line streaming of remote command output. When implemented, RunBidir
+// uses it to deliver reverse-direction interval lines to onInterval as they
+// arrive instead of replaying them after the test completes.
+type StreamingSSHClient interface {
+	RunCommandStream(cmd string, onLine func(string)) (string, error)
+}
+
 
 // Runner executes iperf2 commands.
 type Runner struct {
@@ -269,9 +277,33 @@ func (r *Runner) RunReverse(ctx context.Context, cfg Config, sshCli SSHClient, o
 	r.mu.Unlock()
 	time.Sleep(400 * time.Millisecond)
 
-	// Start remote client via SSH
+	// Start remote client via SSH (stream interval lines live if supported)
 	revCmd := cfg.revClientCmd()
-	revOutput, revErr := sshCli.RunCommand(revCmd)
+	var revOutput string
+	var revErr error
+	revStreamed := false
+	if streamer, ok := sshCli.(StreamingSSHClient); ok {
+		revStreamed = true
+		var agg *IntervalAggregator
+		if onInterval != nil {
+			agg = NewIntervalAggregator(func(iv *model.IntervalResult) {
+				onInterval(iv, nil)
+			})
+		}
+		revOutput, revErr = streamer.RunCommandStream(revCmd, func(line string) {
+			if agg == nil {
+				return
+			}
+			if iv, err := ParseIntervalLine(line); err == nil && iv != nil {
+				agg.Add(iv)
+			}
+		})
+		if agg != nil {
+			agg.Flush()
+		}
+	} else {
+		revOutput, revErr = sshCli.RunCommand(revCmd)
+	}
 
 	// Stop local server
 	if localSrvCmd.Process != nil {
@@ -300,8 +332,8 @@ func (r *Runner) RunReverse(ctx context.Context, cfg Config, sshCli SSHClient, o
 	if revClientResult != nil {
 		result := MergeUnidirResults(revClientResult, localSrvResult)
 		result.Direction = "Reverse"
-		// Fire interval callback with server data
-		if onInterval != nil {
+		// Replay intervals only if we didn't stream them live
+		if onInterval != nil && !revStreamed {
 			for i := range localSrvResult.Intervals {
 				onInterval(&localSrvResult.Intervals[i], nil)
 			}
@@ -310,7 +342,7 @@ func (r *Runner) RunReverse(ctx context.Context, cfg Config, sshCli SSHClient, o
 	}
 
 	localSrvResult.Direction = "Reverse"
-	if onInterval != nil {
+	if onInterval != nil && !revStreamed {
 		for i := range localSrvResult.Intervals {
 			onInterval(&localSrvResult.Intervals[i], nil)
 		}
@@ -396,21 +428,51 @@ func (r *Runner) RunBidir(ctx context.Context, cfg Config, sshCli SSHClient, onI
 	fwdCh := make(chan cmdResult, 1)
 	revCh := make(chan cmdResult, 1)
 
-	// Forward: local client → remote server
+	// Adapters that forward live interval lines as (fwd, nil) and (nil, rev).
+	fwdStream := func(fwd, _ *model.IntervalResult) {
+		if onInterval != nil && fwd != nil {
+			onInterval(fwd, nil)
+		}
+	}
+	var revAgg *IntervalAggregator
+	if onInterval != nil {
+		revAgg = NewIntervalAggregator(func(iv *model.IntervalResult) {
+			onInterval(nil, iv)
+		})
+	}
+	revOnLine := func(line string) {
+		if revAgg == nil {
+			return
+		}
+		if iv, err := ParseIntervalLine(line); err == nil && iv != nil {
+			revAgg.Add(iv)
+		}
+	}
+
+	// Forward: local client → remote server (streamed)
 	go func() {
 		clientArgs := cfg.fwdClientArgs()
-		out, err := r.runLocalClient(ctx, cfg.BinaryPath, clientArgs, nil)
+		out, err := r.runLocalClient(ctx, cfg.BinaryPath, clientArgs, fwdStream)
 		fwdCh <- cmdResult{out, err}
 	}()
 
-	// Reverse: remote client → local server
+	// Reverse: remote client → local server (streamed if supported)
+	streamer, streamedReverse := sshCli.(StreamingSSHClient)
 	go func() {
+		if streamedReverse {
+			out, err := streamer.RunCommandStream(cfg.revClientCmd(), revOnLine)
+			revCh <- cmdResult{out, err}
+			return
+		}
 		out, err := sshCli.RunCommand(cfg.revClientCmd())
 		revCh <- cmdResult{out, err}
 	}()
 
 	fwdOut := <-fwdCh
 	revOut := <-revCh
+	if revAgg != nil {
+		revAgg.Flush()
+	}
 
 	// Stop local server
 	if localSrvCmd.Process != nil {
@@ -464,23 +526,13 @@ func (r *Runner) RunBidir(ctx context.Context, cfg Config, sshCli SSHClient, onI
 	// Merge all results
 	merged := MergeBidirResults(fwdClientResult, fwdServerResult, revClientResult, revServerResult)
 
-	// Fire onInterval callbacks (post-test replay)
-	if onInterval != nil {
-		fwdIvs := merged.Intervals
-		revIvs := merged.ReverseIntervals
-		maxLen := len(fwdIvs)
-		if len(revIvs) > maxLen {
-			maxLen = len(revIvs)
-		}
-		for i := 0; i < maxLen; i++ {
-			var fwd, rev *model.IntervalResult
-			if i < len(fwdIvs) {
-				fwd = &fwdIvs[i]
-			}
-			if i < len(revIvs) {
-				rev = &revIvs[i]
-			}
-			onInterval(fwd, rev)
+	// Fire onInterval callbacks (post-test replay) only for any direction that
+	// wasn't streamed live. Forward is always streamed via runLocalClient; the
+	// reverse direction is streamed only when the SSH client implements
+	// StreamingSSHClient.
+	if onInterval != nil && !streamedReverse {
+		for i := range merged.ReverseIntervals {
+			onInterval(nil, &merged.ReverseIntervals[i])
 		}
 	}
 
@@ -605,16 +657,25 @@ func (r *Runner) runLocalClient(ctx context.Context, binaryPath string, args []s
 
 	var buf bytes.Buffer
 	scanner := bufio.NewScanner(stdout)
+	var agg *IntervalAggregator
+	if onInterval != nil {
+		agg = NewIntervalAggregator(func(iv *model.IntervalResult) {
+			onInterval(iv, nil)
+		})
+	}
 	for scanner.Scan() {
 		line := scanner.Text()
 		buf.WriteString(line + "\n")
 		logf("%s\n", line)
 
-		if onInterval != nil {
+		if agg != nil {
 			if iv, err := ParseIntervalLine(line); err == nil && iv != nil {
-				onInterval(iv, nil)
+				agg.Add(iv)
 			}
 		}
+	}
+	if agg != nil {
+		agg.Flush()
 	}
 
 	waitErr := cmd.Wait()
