@@ -50,6 +50,13 @@ type Controls struct {
 	runner         *iperf.Runner
 	win            fyne.Window
 
+	udpWarningShown bool // suppress repeated UDP warnings within session
+
+	// IsHostKnownWindows returns true if the given host has previously been
+	// detected as running Windows via SSH. Used to gate the UDP warning so
+	// it only fires for confirmed Windows targets.
+	IsHostKnownWindows func(host string) bool
+
 	container *fyne.Container
 }
 
@@ -146,18 +153,7 @@ func (c *Controls) onStart() {
 
 	// Wire SSH-derived fields into config before validation
 	if c.remotePanel.IsConnected() {
-		if cfg.LocalAddr == "" {
-			cfg.LocalAddr = c.remotePanel.LocalAddr()
-		}
-		cfg.IsWindows = c.remotePanel.IsWindows()
-		// Set default remote output file for SSH fallback
-		if cfg.RemoteOutputFile == "" {
-			if cfg.IsWindows {
-				cfg.RemoteOutputFile = `C:\iperf2_server_output.txt`
-			} else {
-				cfg.RemoteOutputFile = "/tmp/iperf2_server_output.txt"
-			}
-		}
+		c.wireSSHConfig(&cfg)
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -166,6 +162,95 @@ func (c *Controls) onStart() {
 		return
 	}
 
+	// UDP + known Windows target without SSH: warn and offer auto-connect.
+	// We only prompt when we have evidence the target is Windows (either
+	// currently connected and detected, or previously seen as Windows).
+	if strings.EqualFold(cfg.Protocol, "udp") && !c.remotePanel.IsConnected() && !c.udpWarningShown {
+		if c.IsHostKnownWindows != nil && c.IsHostKnownWindows(cfg.ServerAddr) {
+			c.udpWarningShown = true
+			c.showUDPSSHWarning(cfg)
+			return
+		}
+	}
+
+	c.proceedWithTest(cfg)
+}
+
+// wireSSHConfig populates SSH-derived fields on the config.
+func (c *Controls) wireSSHConfig(cfg *iperf.IperfConfig) {
+	if cfg.LocalAddr == "" {
+		cfg.LocalAddr = c.remotePanel.LocalAddr()
+	}
+	cfg.IsWindows = c.remotePanel.IsWindows()
+	if cfg.RemoteOutputFile == "" {
+		if cfg.IsWindows {
+			cfg.RemoteOutputFile = `C:\iperf2_server_output.txt`
+		} else {
+			cfg.RemoteOutputFile = "/tmp/iperf2_server_output.txt"
+		}
+	}
+}
+
+// showUDPSSHWarning displays a dialog when starting a UDP test without SSH.
+func (c *Controls) showUDPSSHWarning(cfg iperf.IperfConfig) {
+	msg := widget.NewLabel(
+		"UDP tests produce more reliable results with an SSH connection.\n" +
+			"Without SSH, server-side statistics (loss, jitter) may be\n" +
+			"unavailable if the Server Report is blocked by NAT.\n\n" +
+			"This is especially important with Windows servers.")
+
+	var d *dialog.CustomDialog
+
+	startAnywayBtn := widget.NewButton("Start Anyway", func() {
+		d.Hide()
+		c.proceedWithTest(cfg)
+	})
+
+	connectAndStartBtn := widget.NewButton("Connect SSH & Start", func() {
+		d.Hide()
+		c.connectSSHThenStart(cfg)
+	})
+	if c.remotePanel.Host() == "" {
+		connectAndStartBtn.Disable()
+	}
+
+	content := container.NewVBox(msg, container.NewHBox(connectAndStartBtn, startAnywayBtn))
+	d = dialog.NewCustom("UDP Test — SSH Recommended", "Cancel", content, c.win)
+	d.SetOnClosed(func() {
+		// If user cancels the dialog, reset state so they can try again
+		c.mu.Lock()
+		if c.state == stateRunning {
+			c.mu.Unlock()
+			c.resetState()
+		} else {
+			c.mu.Unlock()
+		}
+	})
+	d.Show()
+}
+
+// connectSSHThenStart triggers SSH connection and then starts the test.
+func (c *Controls) connectSSHThenStart(cfg iperf.IperfConfig) {
+	c.outputView.Clear()
+	c.outputView.AppendLine("Connecting SSH before UDP test...")
+
+	c.remotePanel.ConnectAsync(func(err error) {
+		if err != nil {
+			fyne.Do(func() {
+				c.outputView.AppendLine(fmt.Sprintf("SSH connect failed: %v", err))
+				c.resetState()
+			})
+			return
+		}
+		fyne.Do(func() {
+			c.wireSSHConfig(&cfg)
+			c.proceedWithTest(cfg)
+		})
+	})
+}
+
+// proceedWithTest runs the iperf test with the given config.
+func (c *Controls) proceedWithTest(cfg iperf.IperfConfig) {
 	c.outputView.Clear()
 
 	go func() {

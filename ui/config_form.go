@@ -26,6 +26,9 @@ type ConfigForm struct {
 	ipv6Check        *widget.Check
 	binaryEntry      *widget.Entry
 	form             *fyne.Container
+
+	// OnProtocolChange is called when the protocol radio selection changes.
+	OnProtocolChange func(protocol string)
 }
 
 // NewConfigForm creates a new configuration form with default values.
@@ -51,7 +54,11 @@ func NewConfigForm() *ConfigForm {
 	cf.durationEntry = widget.NewEntry()
 	cf.durationEntry.SetText("10")
 
-	cf.protocolRadio = widget.NewRadioGroup([]string{"TCP", "UDP"}, nil)
+	cf.protocolRadio = widget.NewRadioGroup([]string{"TCP", "UDP"}, func(selected string) {
+		if cf.OnProtocolChange != nil {
+			cf.OnProtocolChange(selected)
+		}
+	})
 	cf.protocolRadio.SetSelected("TCP")
 	cf.protocolRadio.Horizontal = true
 
